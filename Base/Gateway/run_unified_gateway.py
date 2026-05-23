@@ -179,6 +179,7 @@ def setup_environment(args, mon_config: MonConfig):
 
     os.environ["MAX_CONCURRENT_JOBS"] = str(args.max_concurrent)
     os.environ["LOG_LEVEL"] = str(args.log_level)
+    os.environ["SERVER_PORT"] = str(args.port)
 
     path_env_map = {
         "GPT_SOVITS_ROOT": workspace_root,
@@ -203,6 +204,28 @@ def setup_environment(args, mon_config: MonConfig):
     half_precision = mon_config.get("gpu", "HALF_PRECISION", cast=bool)
     if half_precision is not None:
         os.environ["is_half"] = "True" if half_precision else "False"
+
+    register_host = mon_config.get("monhub", "REGISTER_HOST")
+    if not register_host:
+        register_host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
+
+    monhub_env = {
+        "MONHUB_ENABLED": "true" if mon_config.get("monhub", "ENABLED", False, cast=bool) else "false",
+        "MONHUB_HOST": mon_config.get("monhub", "HOST", "127.0.0.1"),
+        "MONHUB_PORT": str(mon_config.get("monhub", "PORT", 40051, cast=int)),
+        "MONHUB_DISCOVERY_ENABLED": "true" if mon_config.get("monhub", "DISCOVERY_ENABLED", True, cast=bool) else "false",
+        "MONHUB_DISCOVERY_PORT": str(mon_config.get("monhub", "DISCOVERY_PORT", 40053, cast=int)),
+        "MONHUB_SERVICE_ID": mon_config.get("monhub", "SERVICE_ID", "MonGsvFastapi"),
+        "MONHUB_SERVICE_NAME": mon_config.get("monhub", "SERVICE_NAME", mon_config.get("service", "NAME", "MonGsvFastapi")),
+        "MONHUB_SERVICE_TYPE": mon_config.get("monhub", "SERVICE_TYPE", "tts_service"),
+        "MONHUB_SERVICE_VERSION": mon_config.get("service", "VERSION", "1.0.0"),
+        "MONHUB_SERVICE_DESCRIPTION": mon_config.get("service", "DESCRIPTION", "GPT-SoVITS FastAPI voice service"),
+        "MONHUB_HEARTBEAT_INTERVAL": str(mon_config.get("monhub", "HEARTBEAT_INTERVAL", 30, cast=int)),
+        "MONHUB_REGISTER_HOST": register_host,
+        "MONHUB_REGISTER_PORT": str(mon_config.get("monhub", "REGISTER_PORT", args.port, cast=int)),
+    }
+    for env_key, env_value in monhub_env.items():
+        os.environ[env_key] = str(env_value)
 
     print(f"最大并发任务数: {args.max_concurrent}")
 
@@ -239,6 +262,14 @@ def print_startup_info(args, mon_config: MonConfig):
     print(f"自动重载: {'启用' if args.reload else '禁用'}")
     print(f"访问日志: {'启用' if args.access_log else '禁用'}")
     print(f"API认证: {'启用' if args.enable_auth else '禁用'}")
+    monhub_enabled = mon_config.get("monhub", "ENABLED", False, cast=bool)
+    if monhub_enabled:
+        monhub_host = mon_config.get("monhub", "HOST", "127.0.0.1")
+        monhub_port = mon_config.get("monhub", "PORT", 40051, cast=int)
+        monhub_discovery = mon_config.get("monhub", "DISCOVERY_ENABLED", True, cast=bool)
+        print(f"MonHub注册: 启用 ({monhub_host}:{monhub_port}, UDP发现: {'启用' if monhub_discovery else '禁用'})")
+    else:
+        print("MonHub注册: 禁用")
     if workspace_root:
         print(f"工作区根目录: {workspace_root}")
     for config_file in mon_config.loaded_files():
@@ -251,7 +282,7 @@ def print_startup_info(args, mon_config: MonConfig):
         ("模型训练", [("POST", "/training/gpt/start", "GPT训练"), ("POST", "/training/sovits/start", "SoVITS训练"), ("GET", "/training/status/{job_id}", "训练状态")]),
         ("推理服务", [("POST", "/inference/tts", "文本转语音")]),
         ("工作流", [("POST", "/workflow/complete", "完整流程/可选带训练"), ("POST", "/workflow/training/full", "预处理到训练的引导流程"), ("POST", "/batch/projects", "批量处理")]),
-        ("管理监控", [("GET", "/health", "健康检查"), ("GET", "/services/status", "服务状态")]),
+        ("管理监控", [("GET", "/health", "健康检查"), ("GET", "/services/status", "服务状态"), ("GET", "/monhub/status", "MonHub注册状态")]),
     ]
     for category, apis in endpoints:
         print(f"\n{category}:")

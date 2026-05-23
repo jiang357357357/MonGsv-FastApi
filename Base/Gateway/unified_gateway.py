@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
+from Code.FastApi.Base.Hub.monhub_bridge import create_monhub_bridge_from_env
 from Code.FastApi.Base.monconfig import MonConfig
 from Code.FastApi.Domain.Routers import build_domain_router
 
@@ -310,6 +311,19 @@ app.include_router(build_domain_router())
 service_manager = ServiceManager()
 config = _build_runtime_config()
 security = HTTPBearer(auto_error=False)
+monhub_bridge = create_monhub_bridge_from_env()
+
+
+@app.on_event("startup")
+async def start_monhub_bridge():
+    """Register the gateway in MonHub when enabled."""
+    monhub_bridge.start()
+
+
+@app.on_event("shutdown")
+async def stop_monhub_bridge():
+    """Unregister the gateway from MonHub on shutdown."""
+    monhub_bridge.stop()
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -385,7 +399,14 @@ async def health_check():
         "services": service_status,
         "total_services": len(service_manager.service_configs),
         "healthy_services": sum(1 for item in service_status.values() if item.get("status") not in {"error", "load_error"}),
+        "monhub": monhub_bridge.status(),
     }
+
+
+@app.get("/monhub/status")
+async def get_monhub_status():
+    """获取 MonHub 注册桥接状态。"""
+    return monhub_bridge.status()
 
 
 @app.post("/data-prep/audio-slice/process")
