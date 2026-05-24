@@ -16,6 +16,13 @@ from typing import List, Optional
 from Code.FastApi.Base.monconfig import MonConfig
 
 
+SUBPROCESS_TEXT_KWARGS = {
+    "text": True,
+    "encoding": "utf-8",
+    "errors": "replace",
+}
+
+
 @dataclass
 class GatewayProcessInfo:
     pid: int
@@ -56,7 +63,7 @@ def _port_processes_windows(port: int) -> List[GatewayProcessInfo]:
     result = subprocess.run(
         ["netstat", "-ano", "-p", "tcp"],
         capture_output=True,
-        text=True,
+        **SUBPROCESS_TEXT_KWARGS,
         check=False,
         timeout=10,
     )
@@ -112,7 +119,7 @@ def _process_name_windows(pid: int) -> str:
     result = subprocess.run(
         ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
         capture_output=True,
-        text=True,
+        **SUBPROCESS_TEXT_KWARGS,
         check=False,
         timeout=10,
     )
@@ -159,7 +166,7 @@ def stop_gateway(port: Optional[int] = None) -> GatewayStatus:
                 f"Stop-Process -Id {process.pid} -Force -ErrorAction SilentlyContinue",
             ],
             capture_output=True,
-            text=True,
+            **SUBPROCESS_TEXT_KWARGS,
             check=False,
             timeout=10,
         )
@@ -175,7 +182,7 @@ def stop_gateway(port: Optional[int] = None) -> GatewayStatus:
         subprocess.run(
             ["taskkill", "/PID", str(pid), "/F", "/T"],
             capture_output=True,
-            text=True,
+            **SUBPROCESS_TEXT_KWARGS,
             check=False,
             timeout=10,
         )
