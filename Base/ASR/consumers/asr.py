@@ -187,6 +187,10 @@ class ASRWebSocketHandler:
         text = result.get("text", "").strip()
         if not text:
             text = self.last_interim
+        if text:
+            punctuated = await sync_to_async(voice_service.asr.punctuate)(text)
+            if punctuated:
+                text = punctuated
 
         self.accumulated_text = (self.accumulated_text + " " + text).strip()
 

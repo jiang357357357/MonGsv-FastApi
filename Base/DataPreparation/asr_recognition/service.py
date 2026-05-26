@@ -139,7 +139,7 @@ class ASRRecognitionService:
 
     def _build_model_descriptor(self, config: ASRConfig) -> str:
         if config.model_type == "funasr":
-            return f"streaming/{config.language}"
+            return f"funasr-large/{config.language}"
         return f"whisper/{config.model_size}/{config.precision}"
 
     def _build_model_key(self, descriptor: str) -> str:
@@ -147,7 +147,7 @@ class ASRRecognitionService:
 
     def _load_primary_model(self, config: ASRConfig):
         if config.model_type == "funasr":
-            return UnifiedASREngine(engine=UnifiedASREngine.ENGINE_STREAMING)
+            return UnifiedASREngine(engine=UnifiedASREngine.ENGINE_FUNASR)
         if config.model_type == "faster_whisper":
             return UnifiedASREngine(engine=UnifiedASREngine.ENGINE_WHISPER)
         raise ValueError(f"不支持的ASR模型类型: {config.model_type}")
@@ -270,6 +270,8 @@ class ASRRecognitionService:
             raise RuntimeError("ASR模型未加载")
 
         engine_type = ""
+        if config.model_type == "funasr":
+            engine_type = UnifiedASREngine.ENGINE_FUNASR
         if config.model_type == "faster_whisper":
             engine_type = UnifiedASREngine.ENGINE_WHISPER
 

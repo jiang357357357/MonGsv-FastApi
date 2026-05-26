@@ -1,17 +1,20 @@
 import os
 import sys
 import traceback
+from math import gcd
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import soundfile
 import torch
+from scipy import signal
 from funasr import AutoModel
 from tqdm import tqdm
 
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg"}
+STREAMING_SAMPLE_RATE = 16000
 
 
 def resolve_inputs(input_path: str) -> Tuple[List[Tuple[str, str]], str]:
@@ -50,9 +53,22 @@ class StreamingParaformerEngine:
             disable_update=True,
         )
         print(f"[ASR] 流式模型加载完成 ({device_name})")
-        self.chunk_size = [0, 5, 5]
-        self.encoder_chunk_look_back = 2
+        self.chunk_size = [0, 10, 5]
+        self.encoder_chunk_look_back = 4
         self.decoder_chunk_look_back = 1
+
+    def _prepare_audio(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        if audio.ndim > 1:
+            audio = np.mean(audio, axis=1)
+        audio = audio.astype(np.float32, copy=False)
+        if sample_rate != STREAMING_SAMPLE_RATE:
+            divisor = gcd(sample_rate, STREAMING_SAMPLE_RATE)
+            audio = signal.resample_poly(
+                audio,
+                STREAMING_SAMPLE_RATE // divisor,
+                sample_rate // divisor,
+            ).astype(np.float32, copy=False)
+        return audio
 
     def transcribe_streaming(self, audio_data: np.ndarray, cache: dict, is_final: bool = False) -> dict:
         try:
@@ -76,6 +92,7 @@ class StreamingParaformerEngine:
 
     def transcribe_array(self, audio_array: np.ndarray, sample_rate: int = 16000) -> dict:
         try:
+            audio_array = self._prepare_audio(audio_array, sample_rate)
             res = self.model.generate(input=audio_array, batch_size=1, disable_pbar=True)
             text = res[0].get("text", "").strip() if res and len(res) > 0 else ""
             return {"text": text}
@@ -86,6 +103,7 @@ class StreamingParaformerEngine:
     def transcribe(self, audio_path: str) -> dict:
         try:
             speech, sr = soundfile.read(audio_path)
+            speech = self._prepare_audio(speech, sr)
             cache = {}
             stride = self.chunk_size[1] * 960
             total = int(len(speech) / stride) + 1
@@ -116,6 +134,45 @@ class StreamingParaformerEngine:
             except Exception:
                 print(traceback.format_exc())
         return output_name, results
+
+
+class PunctuationEngine:
+    def __init__(self):
+        print("[ASR] 加载中文标点模型...")
+        root = self._find_root()
+        if root:
+            sys.path.insert(0, root)
+        from tools.asr.funasr_asr import ensure_snapshot
+
+        model_path = ensure_snapshot(
+            "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+            "tools/asr/models/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+            ["configuration.json", "model.pt", "tokens.json"],
+        )
+        self.model = AutoModel(
+            model=model_path,
+            model_revision="v2.0.4",
+            disable_update=True,
+        )
+        print("[ASR] 中文标点模型加载完成")
+
+    def _find_root(self) -> Optional[str]:
+        for parent in Path(__file__).resolve().parents:
+            if (parent / "GPT_SoVITS").exists():
+                return str(parent)
+        return None
+
+    def punctuate(self, text: str) -> str:
+        text = (text or "").strip()
+        if not text:
+            return ""
+        try:
+            result = self.model.generate(input=text, disable_pbar=True)
+            if result and len(result) > 0:
+                return result[0].get("text", text).strip()
+        except Exception as exc:
+            print(f"[ASR] 标点恢复失败: {exc}")
+        return text
 
 
 class LegacyFunasrEngine:
@@ -228,8 +285,8 @@ class ASRManager:
     """统一 ASR 引擎
 
     自动选择后端：
-    - paraformer-zh-streaming（默认）：流式 + 非流式，中文为主
-    - funasr：Paraformer-large 高精度
+    - funasr：Paraformer-large + VAD + 标点，高精度离线识别
+    - paraformer-zh-streaming：流式 + 非流式，中文为主
     - faster_whisper：多语言
     """
 
@@ -237,11 +294,12 @@ class ASRManager:
     ENGINE_FUNASR = "funasr"
     ENGINE_WHISPER = "whisper"
 
-    def __init__(self, engine: str = ENGINE_STREAMING):
+    def __init__(self, engine: str = ENGINE_FUNASR):
         self._engine_type = engine
         self._streaming: Optional[StreamingParaformerEngine] = None
         self._funasr: Optional[LegacyFunasrEngine] = None
         self._whisper: Optional[FasterWhisperEngine] = None
+        self._punctuation: Optional[PunctuationEngine] = None
 
     @property
     def streaming(self) -> StreamingParaformerEngine:
@@ -261,11 +319,21 @@ class ASRManager:
             self._whisper = FasterWhisperEngine()
         return self._whisper
 
+    @property
+    def punctuation(self) -> PunctuationEngine:
+        if self._punctuation is None:
+            self._punctuation = PunctuationEngine()
+        return self._punctuation
+
     def select_engine(self, language: str = "zh", model_type: str = "") -> str:
         if model_type == "faster_whisper":
             return self.ENGINE_WHISPER
-        if model_type == "funasr" or language in ("zh", "yue"):
-            return self.ENGINE_FUNASR if model_type == "funasr" else self.ENGINE_STREAMING
+        if model_type == "funasr":
+            return self.ENGINE_FUNASR
+        if self._engine_type:
+            return self._engine_type
+        if language in ("zh", "yue"):
+            return self.ENGINE_FUNASR
         return self.ENGINE_WHISPER
 
     def transcribe_streaming(self, audio_data: np.ndarray, cache: dict, is_final: bool = False) -> dict:
@@ -296,3 +364,6 @@ class ASRManager:
         if e == self.ENGINE_FUNASR:
             return self.funasr.batch_transcribe(input_path, language)
         return self.streaming.batch_transcribe(input_path, language)
+
+    def punctuate(self, text: str) -> str:
+        return self.punctuation.punctuate(text)
