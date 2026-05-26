@@ -182,7 +182,7 @@ class RoleService:
                 {
                     "name": parsed["name"],
                     "text": parsed["text"],
-                    "music_url": f"/inference/ref-audio?path={path}",
+                    "music_url": str(path),
                     "text_language": parsed["language"],
                     "file_name": path.name,
                 }
@@ -240,7 +240,7 @@ class RoleService:
         return {
             "emotion": normalized_name,
             "text": normalized_text,
-            "audio_file": f"/inference/ref-audio?path={target_path}",
+            "audio_file": str(target_path),
             "file_name": target_path.name,
             "emotions": self.list_role_emotions(role_id),
         }
@@ -256,10 +256,9 @@ class RoleService:
 
         emotions = self.list_role_emotions(role_id)
         next_prompt = emotions[0] if emotions else None
-        next_path = emotion_dir / next_prompt["file_name"] if next_prompt else None
         updated_role = entry.info.copy(update={
             "prompt_text": next_prompt["text"] if next_prompt else None,
-            "prompt_audio_path": str(next_path) if next_path else None,
+            "prompt_audio_path": next_prompt["music_url"] if next_prompt else None,
         })
         self._write_role_metadata(entry.model_root, updated_role)
         return {
