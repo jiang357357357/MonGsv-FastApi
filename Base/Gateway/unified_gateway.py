@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from Code.FastApi.Base.Hub.monhub_bridge import create_monhub_bridge_from_env
 from Code.FastApi.Base.monconfig import MonConfig
+from Code.FastApi.Domain.Role.Services import RoleService
 from Code.FastApi.Domain.Routers import build_domain_router
 
 gateway_dir = Path(__file__).resolve().parent
@@ -114,6 +115,28 @@ class TrainingWorkflowOptions(BaseModel):
     sovits_batch_size: int = 32
     sovits_total_epoch: int = 8
     training_order: str = "sovits_first"
+
+
+class RoleEmotionSynthesisRequest(BaseModel):
+    """业务合成请求：前端只提交角色、情感和文本。"""
+
+    role_id: int
+    emotion: str
+    text: str
+    text_language: str = "zh"
+    world_id: Optional[int] = None
+    version: Optional[str] = None
+    how_to_cut: str = "按标点符号切"
+    top_k: int = 20
+    top_p: float = 0.6
+    temperature: float = 0.6
+    speed: float = 1.0
+    sample_steps: int = 8
+    if_sr: bool = False
+    ref_free: bool = False
+    if_freeze: bool = False
+    pause_second: float = 0.3
+    return_base64: bool = True
 
 
 def _resources_root() -> Path:
@@ -898,6 +921,87 @@ async def text_to_speech(
                 os.unlink(temp_audio_path)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"语音合成失败: {exc}")
+
+
+@app.post("/api/synthesis/role-emotion")
+async def synthesize_role_emotion(
+    payload: RoleEmotionSynthesisRequest,
+    user: Any = Depends(get_current_user),
+):
+    """按角色与情感合成语音。
+
+    这是面向前端/业务系统的接口；模型路径、参考音频、参考文本由后端解析。
+    """
+    service = _ensure_service("inference")
+    role_service = RoleService()
+
+    try:
+        from Code.FastApi.Base.Inference.service import InferenceRequest, InferenceConfig
+
+        if not payload.text.strip():
+            raise ValueError("请输入要合成的文本")
+        if not payload.emotion.strip():
+            raise ValueError("请选择情感")
+
+        role = role_service.get_role(payload.role_id)
+        if payload.world_id is not None and role.world_id != payload.world_id:
+            raise ValueError("角色不属于当前世界")
+        if payload.version and role.version != payload.version:
+            raise ValueError("角色不属于当前版本")
+        if not role.gpt_model_path or not role.sov_model_path:
+            raise ValueError("当前角色缺少 GPT 或 SoVITS 模型路径")
+
+        emotions = role_service.list_role_emotions(payload.role_id)
+        selected_emotion = next(
+            (
+                item for item in emotions
+                if str(item.get("name", "")).strip() == payload.emotion.strip()
+            ),
+            None,
+        )
+        if selected_emotion is None:
+            raise ValueError(f"当前角色没有情感配置: {payload.emotion}")
+
+        ref_audio_path = str(selected_emotion.get("music_url") or "").strip()
+        if not ref_audio_path:
+            raise ValueError("当前情感缺少参考音频")
+        prompt_text = str(selected_emotion.get("text") or role.prompt_text or "")
+        prompt_language = str(selected_emotion.get("text_language") or role.language or payload.text_language)
+
+        model_info = service.get_model_info() if hasattr(service, "get_model_info") else {}
+        models_loaded = bool(
+            model_info.get("models_loaded")
+            and model_info.get("gpt_path") == role.gpt_model_path
+            and model_info.get("sovits_path") == role.sov_model_path
+        )
+        if not models_loaded and not service.load_models(role.gpt_model_path, role.sov_model_path):
+            raise ValueError("模型加载失败")
+
+        request = InferenceRequest(
+            text=payload.text.strip(),
+            text_language=payload.text_language,
+            ref_audio_path=ref_audio_path,
+            prompt_text=prompt_text,
+            prompt_language=prompt_language,
+            config=InferenceConfig(
+                how_to_cut=payload.how_to_cut,
+                top_k=payload.top_k,
+                top_p=payload.top_p,
+                temperature=payload.temperature,
+                speed=payload.speed,
+                sample_steps=payload.sample_steps,
+                if_sr=payload.if_sr,
+                ref_free=payload.ref_free,
+                if_freeze=payload.if_freeze,
+                pause_second=payload.pause_second,
+            ),
+            return_base64=payload.return_base64,
+        )
+        return await service.inference(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"按角色情感合成失败: {exc}")
 
 
 @app.post("/inference/models/load")

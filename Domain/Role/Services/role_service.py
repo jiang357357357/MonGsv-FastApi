@@ -53,6 +53,10 @@ class RoleService:
             ]
         return sorted(items, key=lambda item: ((item.world_name or "").lower(), item.name.lower(), item.version or "", item.id))
 
+    def get_role(self, role_id: int) -> RoleInfo:
+        entry = self._require_role_entry(role_id)
+        return entry.info
+
     def list_role_workspaces(self) -> list[dict]:
         model_root = self._model_root()
         workspaces: list[dict] = []
