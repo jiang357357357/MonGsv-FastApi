@@ -122,6 +122,7 @@ class InferenceService:
         self._TTS = None
         self._TTS_Config = None
         self._detect_sovits_version = None
+        self._get_text_split_method = None
         self.residency_manager = ModelResidencyManager(
             ResidencyConfig(
                 idle_ttl_seconds=int(os.environ.get("INFERENCE_IDLE_TTL_SECONDS", "1200")),
@@ -150,10 +151,12 @@ class InferenceService:
     def _import_modules(self):
         """延迟导入官方推理管线。"""
         from TTS_infer_pack.TTS import TTS, TTS_Config
+        from TTS_infer_pack.text_segmentation_method import get_method
         from process_ckpt import get_sovits_version_from_path_fast
 
         self._TTS = TTS
         self._TTS_Config = TTS_Config
+        self._get_text_split_method = get_method
         self._detect_sovits_version = get_sovits_version_from_path_fast
 
     def _build_tts_config(self, gpt_path: str, sovits_path: str):
@@ -301,37 +304,23 @@ class InferenceService:
         raise ValueError("必须提供参考音频(ref_audio_path 或 ref_audio_base64)")
 
     def _preprocess_text(self, text: str, how_to_cut: str) -> List[str]:
-        """轻量文本切分，仅用于响应展示。"""
+        """使用 GPT-SoVITS 官方切分方法生成响应展示分段。"""
         text = text.strip()
         if not text:
             return []
-        if how_to_cut in {"不切", "cut0"}:
+
+        method_name = self.CUT_METHODS.get(how_to_cut, "cut0")
+        if not self._get_text_split_method:
             return [text]
-        if how_to_cut in {"按中文句号。切", "cut3"}:
-            return [item.strip() for item in text.split("。") if item.strip()]
-        if how_to_cut in {"按英文句号.切", "cut4"}:
-            return [item.strip() for item in text.split(".") if item.strip()]
-        if how_to_cut in {"按标点符号切", "cut5"}:
-            import re
 
-            return [item.strip() for item in re.split(r"[。！？.!?;；]", text) if item.strip()]
-        if how_to_cut in {"凑四句一切", "cut1"}:
-            import re
+        try:
+            method = self._get_text_split_method(method_name)
+            split_text = method(text)
+        except Exception as exc:
+            print(f"文本切分失败，回退为不切分: {exc}")
+            return [text]
 
-            segments = [item.strip() for item in re.split(r"(?<=[。！？.!?])", text) if item.strip()]
-            return ["".join(segments[i : i + 4]) for i in range(0, len(segments), 4)]
-        if how_to_cut in {"凑50字一切", "cut2"}:
-            result: List[str] = []
-            current = ""
-            for char in text:
-                current += char
-                if len(current) >= 50 and char in "。！？.!?":
-                    result.append(current)
-                    current = ""
-            if current:
-                result.append(current)
-            return result
-        return [text]
+        return [item.strip() for item in str(split_text).splitlines() if item.strip()]
 
     def _build_tts_inputs(self, request: InferenceRequest, ref_audio_path: str) -> Dict[str, Any]:
         """将服务请求映射为官方 TTS 输入。"""

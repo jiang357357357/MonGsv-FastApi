@@ -74,10 +74,18 @@ class RoleService:
             gpt_weights_dir = role_model_root / "GPT"
             sovits_weights_dir = role_model_root / "SoVITS"
             model_sliced_files = self._list_files(model_sliced_dir)
+            sliced_files = self._list_files(sliced_dir)
             raw_files = self._list_files(raw_dir)
             prompt_files = self._list_files(prompt_dir)
             gpt_models = self._list_files(gpt_weights_dir, {".ckpt"})
             sovits_models = self._list_files(sovits_weights_dir, {".pth"})
+            print(
+                "[role-workspace] "
+                f"world={world_name} role={role_name} version={base_version} "
+                f"model_sliced={len(model_sliced_files)} train_sliced={len(sliced_files)} "
+                f"model_dir={model_sliced_dir} train_dir={sliced_dir or ''}",
+                flush=True,
+            )
             workspaces.append(
                 {
                     "role_name": role_name,
@@ -92,6 +100,7 @@ class RoleService:
                     "sliced_dir": str(sliced_dir) if sliced_dir is not None else "",
                     "raw_files": raw_files,
                     "model_sliced_files": model_sliced_files,
+                    "sliced_files": sliced_files,
                     "prompt_dir": str(prompt_dir) if prompt_dir is not None else "",
                     "prompt_files": prompt_files,
                     "gpt_models": gpt_models,
@@ -198,7 +207,7 @@ class RoleService:
         emotion_dir.mkdir(parents=True, exist_ok=True)
 
         existing = self._find_emotion_file(emotion_dir, normalized_name)
-        source_path = self._resolve_role_audio_source(entry.model_root, audio_source_path)
+        source_path = self._resolve_role_audio_source(entry.model_root, entry.train_root, audio_source_path)
         source_name = audio_filename or (source_path.name if source_path else existing.name if existing else "audio.wav")
         suffix = Path(source_name).suffix.lower() or ".wav"
         if suffix not in self.AUDIO_SUFFIXES:
@@ -717,25 +726,47 @@ class RoleService:
                 return path
         return None
 
-    def _resolve_role_audio_source(self, model_root: Path, audio_source_path: str | None) -> Path | None:
+    def _resolve_role_audio_source(
+        self,
+        model_root: Path,
+        train_root: Path | None,
+        audio_source_path: str | None,
+    ) -> Path | None:
         raw_path = (audio_source_path or "").strip()
         if not raw_path:
             return None
 
         source_path = Path(raw_path).expanduser().resolve()
-        sliced_root = (model_root / "sliced").resolve()
+        allowed_roots = [(model_root / "sliced").resolve()]
+        if train_root is not None:
+            allowed_roots.append((train_root / "dataset" / "sliced").resolve())
         if not source_path.exists() or not source_path.is_file():
+            print(
+                "[role-emotion] 切分音频不存在: "
+                f"path={audio_source_path} allowed_roots={[str(root) for root in allowed_roots]}",
+                flush=True,
+            )
             raise ValueError(f"切分音频不存在: {audio_source_path}")
         if source_path.suffix.lower() not in self.AUDIO_SUFFIXES:
+            print(
+                "[role-emotion] 不支持的切分音频格式: "
+                f"path={source_path} suffix={source_path.suffix}",
+                flush=True,
+            )
             raise ValueError(f"不支持的切分音频格式: {source_path.suffix}")
-        if not (source_path.parent == sliced_root or sliced_root in source_path.parents):
-            raise ValueError("选择的切分音频不在当前角色的 sliced 目录中")
+        if not any(source_path.parent == root or root in source_path.parents for root in allowed_roots):
+            print(
+                "[role-emotion] 切分音频目录不匹配: "
+                f"path={source_path} allowed_roots={[str(root) for root in allowed_roots]}",
+                flush=True,
+            )
+            raise ValueError("选择的切分音频不在当前角色的模型 sliced 目录或训练 dataset/sliced 目录中")
 
         return source_path
 
     @staticmethod
-    def _list_files(directory: Path, allowed_suffixes: set[str] | None = None) -> list[str]:
-        if not directory.exists():
+    def _list_files(directory: Path | None, allowed_suffixes: set[str] | None = None) -> list[str]:
+        if directory is None or not directory.exists():
             return []
         suffixes = {item.lower() for item in allowed_suffixes} if allowed_suffixes else None
         files: list[str] = []

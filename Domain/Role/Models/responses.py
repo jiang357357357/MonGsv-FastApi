@@ -65,6 +65,7 @@ class RoleWorkspaceSummary(BaseModel):
     sliced_dir: str
     raw_files: list[str]
     model_sliced_files: list[str]
+    sliced_files: list[str] = []
     prompt_dir: str
     prompt_files: list[str]
     gpt_models: list[str]
