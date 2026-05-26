@@ -347,10 +347,12 @@ class GPTTrainingService:
             # 验证训练数据
             validation_result = self._validate_training_data(s1_dir)
             if not validation_result["valid"]:
+                print(f"[gpt_training] 停止启动: {validation_result['error']}")
                 return GPTTrainingResponse(
                     success=False,
                     message=validation_result["error"]
                 )
+            print(f"[gpt_training] 训练前置数据检查通过: {validation_result}")
             
             # 构建训练命令
             cmd = [

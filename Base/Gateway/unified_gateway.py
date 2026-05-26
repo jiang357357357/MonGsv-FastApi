@@ -364,6 +364,94 @@ def _ensure_service(name: str):
     return service
 
 
+class WorkflowAbortError(RuntimeError):
+    """Raised when a workflow must stop before launching training."""
+
+
+def _service_unavailable_message(name: str) -> str:
+    load_error = getattr(service_manager, "load_errors", {}).get(name)
+    if load_error:
+        return f"服务不可用: {name}，加载失败: {load_error}"
+    return f"服务不可用: {name}"
+
+
+def _stop_workflow(message: str) -> None:
+    print(f"[workflow] 停止执行: {message}")
+    raise WorkflowAbortError(message)
+
+
+def _require_workflow_service(name: str):
+    service = service_manager.get_service(name)
+    if not service:
+        _stop_workflow(_service_unavailable_message(name))
+    return service
+
+
+def _step_result_success(result: Any) -> bool:
+    if result is None:
+        return False
+    if isinstance(result, dict):
+        return bool(result.get("success", False))
+    if hasattr(result, "success"):
+        return bool(getattr(result, "success"))
+    return False
+
+
+def _step_result_message(result: Any) -> str:
+    payload = _to_payload(result)
+    if isinstance(payload, dict):
+        for key in ("message", "error", "detail", "Exception"):
+            value = payload.get(key)
+            if value:
+                return str(value)
+    return str(payload)
+
+
+def _require_step_success(step_name: str, result: Any) -> None:
+    if _step_result_success(result):
+        return
+    _stop_workflow(f"{step_name} 失败: {_step_result_message(result)}")
+
+
+def _validate_training_dataset(project_root: str, version: str, require_gpt: bool, require_sovits: bool) -> dict[str, Any]:
+    dataset_root = Path(project_root) / "dataset"
+    required_paths: list[Path] = []
+
+    if require_gpt:
+        required_paths.extend([
+            dataset_root / "2-name2text.txt",
+            dataset_root / "6-name2semantic.tsv",
+        ])
+
+    if require_sovits:
+        required_paths.extend([
+            dataset_root / "2-name2text.txt",
+            dataset_root / "4-cnhubert",
+            dataset_root / "5-wav32k",
+        ])
+        if version in {"v2Pro", "v2ProPlus"}:
+            required_paths.append(dataset_root / "7-sv_cn")
+
+    missing = [str(path) for path in dict.fromkeys(required_paths) if not path.exists()]
+    if missing:
+        _stop_workflow("训练前置数据缺失: " + "; ".join(missing))
+
+    stats: dict[str, Any] = {"dataset_root": str(dataset_root)}
+    text_file = dataset_root / "2-name2text.txt"
+    semantic_file = dataset_root / "6-name2semantic.tsv"
+    if text_file.exists():
+        stats["text_lines"] = len(text_file.read_text(encoding="utf-8", errors="ignore").splitlines())
+    if semantic_file.exists():
+        stats["semantic_lines"] = max(0, len(semantic_file.read_text(encoding="utf-8", errors="ignore").splitlines()) - 1)
+    for dirname in ("4-cnhubert", "5-wav32k", "7-sv_cn"):
+        directory = dataset_root / dirname
+        if directory.exists():
+            stats[f"{dirname}_files"] = sum(1 for item in directory.iterdir() if item.is_file())
+
+    print(f"[workflow] 训练前置数据检查通过: {stats}")
+    return stats
+
+
 def _project_root(output_dir: str, project_name: str) -> str:
     return os.path.join(output_dir, project_name)
 
@@ -1159,69 +1247,50 @@ async def _run_preprocessing_workflow(
     os.makedirs(dataset_root, exist_ok=True)
     os.makedirs(model_sliced_dir, exist_ok=True)
 
-    slice_service = service_manager.get_service("audio_slice")
-    if slice_service:
-        from Code.FastApi.Base.DataPreparation.audio_slice.service import SliceRequest, SliceConfig
+    slice_service = _require_workflow_service("audio_slice")
+    from Code.FastApi.Base.DataPreparation.audio_slice.service import SliceRequest, SliceConfig
 
-        slice_request = SliceRequest(
-            input_path=input_audio_dir,
-            output_dir=slice_output,
-            config=SliceConfig(),
-        )
-        slice_result = await slice_service.process(slice_request)
-        copied_slice_files = []
-        slice_success = bool(getattr(slice_result, "success", False))
-        if slice_success:
-            copied_slice_files = _sync_directory_files(
-                Path(slice_output),
-                Path(model_sliced_dir),
-            )
-        workflow_steps.append({"step": "audio_slice", "result": _to_payload(slice_result)})
-        workflow_steps.append(
-            {
-                "step": "model_slice_sync",
-                "result": {
-                    "success": slice_success,
-                    "message": (
-                        f"已同步 {len(copied_slice_files)} 个切分音频到模型目录"
-                        if slice_success
-                        else "音频切分未成功，未同步到模型目录"
-                    ),
-                    "output_dir": model_sliced_dir,
-                    "output_files": copied_slice_files,
-                },
-            }
-        )
+    slice_request = SliceRequest(
+        input_path=input_audio_dir,
+        output_dir=slice_output,
+        config=SliceConfig(),
+    )
+    slice_result = await slice_service.process(slice_request)
+    workflow_steps.append({"step": "audio_slice", "result": _to_payload(slice_result)})
+    _require_step_success("audio_slice", slice_result)
 
-    asr_service = service_manager.get_service("asr_recognition")
-    if asr_service:
-        from Code.FastApi.Base.DataPreparation.asr_recognition.service import ASRRequest, ASRConfig
+    copied_slice_files = _sync_directory_files(
+        Path(slice_output),
+        Path(model_sliced_dir),
+    )
+    sync_result = {
+        "success": bool(copied_slice_files),
+        "message": f"已同步 {len(copied_slice_files)} 个切分音频到模型目录" if copied_slice_files else "没有可同步的切分音频",
+        "output_dir": model_sliced_dir,
+        "output_files": copied_slice_files,
+    }
+    workflow_steps.append({"step": "model_slice_sync", "result": sync_result})
+    _require_step_success("model_slice_sync", sync_result)
 
-        asr_request = ASRRequest(
-            input_path=slice_output,
-            output_dir=asr_output_dir,
-            config=ASRConfig(language=language),
-        )
-        asr_result = await asr_service.process(asr_request)
-        if getattr(asr_result, "output_file", None):
-            list_file = asr_result.output_file
-        workflow_steps.append({"step": "asr_recognition", "result": _to_payload(asr_result)})
+    asr_service = _require_workflow_service("asr_recognition")
+    from Code.FastApi.Base.DataPreparation.asr_recognition.service import ASRRequest, ASRConfig
 
-    format_tasks = []
-    text_service = service_manager.get_service("text_processing")
-    if text_service:
-        format_tasks.append(("text_processing", text_service))
+    asr_request = ASRRequest(
+        input_path=slice_output,
+        output_dir=asr_output_dir,
+        config=ASRConfig(language=language),
+    )
+    asr_result = await asr_service.process(asr_request)
+    workflow_steps.append({"step": "asr_recognition", "result": _to_payload(asr_result)})
+    _require_step_success("asr_recognition", asr_result)
+    if getattr(asr_result, "output_file", None):
+        list_file = asr_result.output_file
+    if not Path(list_file).exists():
+        _stop_workflow(f"ASR 未生成标注文件: {list_file}")
 
-    audio_service = service_manager.get_service("audio_features")
-    if audio_service:
-        format_tasks.append(("audio_features", audio_service))
-
-    semantic_service = service_manager.get_service("semantic_encoding")
-    if semantic_service:
-        format_tasks.append(("semantic_encoding", semantic_service))
-
-    format_results = await asyncio.gather(*[
-        execute_format_task(
+    for task_name in ("text_processing", "audio_features", "semantic_encoding"):
+        service = _require_workflow_service(task_name)
+        result = await execute_format_task(
             task_name=task_name,
             service=service,
             list_file=list_file,
@@ -1230,11 +1299,8 @@ async def _run_preprocessing_workflow(
             project_name=project_name,
             version=version,
         )
-        for task_name, service in format_tasks
-    ])
-
-    for index, (task_name, _) in enumerate(format_tasks):
-        workflow_steps.append({"step": task_name, "result": _to_payload(format_results[index])})
+        workflow_steps.append({"step": task_name, "result": _to_payload(result)})
+        _require_step_success(task_name, result)
 
     return {
         "project_name": project_name,
@@ -1270,6 +1336,20 @@ async def _start_training_workflow(
         ordered_targets = ["sovits", "gpt"]
 
     launches: List[Dict[str, Any]] = []
+    dataset_check = _validate_training_dataset(
+        project_root=project_root,
+        version=version,
+        require_gpt=options.train_gpt,
+        require_sovits=options.train_sovits,
+    )
+    launches.append({
+        "step": "training_dataset_check",
+        "result": {
+            "success": True,
+            "message": "训练前置数据检查通过",
+            **dataset_check,
+        },
+    })
 
     for target in ordered_targets:
         if target == "gpt" and options.train_gpt:
@@ -1289,6 +1369,8 @@ async def _start_training_workflow(
                 ),
             )
             result = await service.start_training(request)
+            if not _step_result_success(result):
+                _stop_workflow(f"GPT训练未启动: {_step_result_message(result)}")
             launches.append({
                 "step": "gpt_training",
                 "result": _to_payload(result),
@@ -1311,6 +1393,8 @@ async def _start_training_workflow(
                 ),
             )
             result = await service.start_training(request)
+            if not _step_result_success(result):
+                _stop_workflow(f"SoVITS训练未启动: {_step_result_message(result)}")
             launches.append({
                 "step": "sovits_training",
                 "result": _to_payload(result),
@@ -1384,6 +1468,8 @@ async def complete_workflow(
             "training_steps": training_steps,
             "next_action": "查看训练状态" if start_training else "可以开始训练模型",
         }
+    except WorkflowAbortError as exc:
+        raise HTTPException(status_code=400, detail=f"工作流已停止: {exc}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"工作流执行失败: {exc}")
 
@@ -1452,6 +1538,8 @@ async def full_training_workflow(
             "steps": [*preprocess_result["steps"], *training_steps],
             "next_action": "使用 /training/status/{job_id} 查看训练状态",
         }
+    except WorkflowAbortError as exc:
+        raise HTTPException(status_code=400, detail=f"训练引导工作流已停止: {exc}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"训练引导工作流执行失败: {exc}")
 

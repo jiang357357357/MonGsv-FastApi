@@ -273,6 +273,42 @@ class SoVITSTrainingService:
         
         return s2_dir, config_file
 
+    def _validate_training_data(self, s2_dir: str, version: str) -> Dict[str, Any]:
+        """验证 SoVITS 训练前置数据，避免缺文件时启动训练进程。"""
+        dataset_dir = os.path.join(s2_dir, "dataset")
+        required_paths = [
+            os.path.join(dataset_dir, "2-name2text.txt"),
+            os.path.join(dataset_dir, "4-cnhubert"),
+            os.path.join(dataset_dir, "5-wav32k"),
+        ]
+        if version in {"v2Pro", "v2ProPlus"}:
+            required_paths.append(os.path.join(dataset_dir, "7-sv_cn"))
+
+        missing = [path for path in required_paths if not os.path.exists(path)]
+        if missing:
+            return {
+                "valid": False,
+                "error": "缺少 SoVITS 训练前置数据: " + "; ".join(missing),
+            }
+
+        stats: Dict[str, Any] = {"dataset_dir": dataset_dir}
+        text_file = os.path.join(dataset_dir, "2-name2text.txt")
+        try:
+            with open(text_file, "r", encoding="utf-8") as f:
+                stats["text_lines"] = len(f.readlines())
+        except Exception as exc:
+            return {
+                "valid": False,
+                "error": f"读取 SoVITS 文本标注失败: {exc}",
+            }
+
+        for dirname in ["4-cnhubert", "5-wav32k", "7-sv_cn"]:
+            directory = os.path.join(dataset_dir, dirname)
+            if os.path.exists(directory):
+                stats[f"{dirname}_files"] = len([name for name in os.listdir(directory) if os.path.isfile(os.path.join(directory, name))])
+
+        return {"valid": True, **stats}
+
     def _open_log_file(self, log_file: str):
         """以行缓冲方式打开日志文件。"""
         return open(log_file, "a", encoding="utf-8", buffering=1)
@@ -318,6 +354,19 @@ class SoVITSTrainingService:
             
             # 准备训练环境
             s2_dir, config_file = self._prepare_training_environment(request)
+
+            validation_result = self._validate_training_data(s2_dir, request.config.version)
+            if not validation_result["valid"]:
+                message = validation_result["error"]
+                print(f"[sovits_training] 停止启动: {message}")
+                return SoVITSTrainingResponse(
+                    success=False,
+                    message=message,
+                    config_file=config_file,
+                    log_dir=os.path.join(s2_dir, "train", "logs"),
+                    model_dir=request.model_output_dir.strip() if request.model_output_dir and request.model_output_dir.strip() else os.path.join(s2_dir, "SoVITS_weights"),
+                )
+            print(f"[sovits_training] 训练前置数据检查通过: {validation_result}")
             
             # 选择训练脚本
             if request.config.version in ["v1", "v2", "v2Pro", "v2ProPlus"]:
