@@ -18,7 +18,7 @@ class InferenceConfig(BaseModel):
     top_k: int = Field(default=20, description="Top-K采样")
     top_p: float = Field(default=0.6, description="Top-P采样")
     temperature: float = Field(default=0.6, description="温度参数")
-    how_to_cut: str = Field(default="不切", description="文本切分方式")
+    how_to_cut: str = Field(default="凑四句一切", description="文本切分方式")
     speed: float = Field(default=1.0, description="语速调节")
     seed: int = Field(default=-1, description="随机种子")
     parallel_infer: bool = Field(default=True, description="并行推理")

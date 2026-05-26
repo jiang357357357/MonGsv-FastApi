@@ -82,6 +82,26 @@ def _save_uploaded_audio_files(input_audio_dir: str, audio_files: Optional[List[
     return saved_files
 
 
+def _build_asr_config_for_language(language: str):
+    """训练/数据准备 ASR 根据语言自动选择识别引擎。"""
+    from Code.FastApi.Base.DataPreparation.asr_recognition.service import ASRConfig
+
+    normalized_language = (language or "zh").strip().lower()
+    if normalized_language in {"zh", "yue"}:
+        return ASRConfig(
+            model_type="funasr",
+            model_size="large",
+            language=normalized_language,
+            precision="float32",
+        )
+    return ASRConfig(
+        model_type="faster_whisper",
+        model_size="large-v3",
+        language=normalized_language if normalized_language else "auto",
+        precision="float16",
+    )
+
+
 class BatchProjectItem(BaseModel):
     """批量项目定义。"""
     name: str
@@ -126,7 +146,7 @@ class RoleEmotionSynthesisRequest(BaseModel):
     text_language: str = "zh"
     world_id: Optional[int] = None
     version: Optional[str] = None
-    how_to_cut: str = "按标点符号切"
+    how_to_cut: str = "凑四句一切"
     top_k: int = 20
     top_p: float = 0.6
     temperature: float = 0.6
@@ -558,7 +578,7 @@ async def asr_recognize(
     temp_audio_path: Optional[str] = None
     temp_audio_dir: Optional[str] = None
     try:
-        from Code.FastApi.Base.DataPreparation.asr_recognition.service import ASRRequest, ASRConfig
+        from Code.FastApi.Base.DataPreparation.asr_recognition.service import ASRRequest
 
         input_path = audio_dir.strip() if audio_dir else ""
         if audio_file is not None:
@@ -578,7 +598,7 @@ async def asr_recognize(
         request = ASRRequest(
             input_path=input_path,
             output_dir=output_dir,
-            config=ASRConfig(language=language),
+            config=_build_asr_config_for_language(language),
         )
         return await service.process(request)
     except Exception as exc:
@@ -1273,12 +1293,12 @@ async def _run_preprocessing_workflow(
     _require_step_success("model_slice_sync", sync_result)
 
     asr_service = _require_workflow_service("asr_recognition")
-    from Code.FastApi.Base.DataPreparation.asr_recognition.service import ASRRequest, ASRConfig
+    from Code.FastApi.Base.DataPreparation.asr_recognition.service import ASRRequest
 
     asr_request = ASRRequest(
         input_path=slice_output,
         output_dir=asr_output_dir,
-        config=ASRConfig(language=language),
+        config=_build_asr_config_for_language(language),
     )
     asr_result = await asr_service.process(asr_request)
     workflow_steps.append({"step": "asr_recognition", "result": _to_payload(asr_result)})

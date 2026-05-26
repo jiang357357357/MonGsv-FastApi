@@ -30,7 +30,7 @@ class InferenceConfig(BaseModel):
     top_k: int = Field(default=20, description="Top-K 采样参数")
     top_p: float = Field(default=0.6, description="Top-P 采样参数")
     temperature: float = Field(default=0.6, description="温度参数")
-    how_to_cut: str = Field(default="不切", description="文本切分方式")
+    how_to_cut: str = Field(default="凑四句一切", description="文本切分方式")
     speed: float = Field(default=1.0, description="语速调节")
     pause_second: float = Field(default=0.3, description="句间停顿时长(秒)")
     ref_free: bool = Field(default=False, description="是否启用无参考模式")
