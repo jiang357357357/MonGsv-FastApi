@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import shutil
 import subprocess
 import time
@@ -112,6 +113,48 @@ def _port_processes_windows(port: int) -> List[GatewayProcessInfo]:
     return processes
 
 
+def _port_processes_linux(port: int) -> List[GatewayProcessInfo]:
+    result = subprocess.run(
+        ["lsof", "-ti", f"tcp:{port}", "-s", "tcp:listen"],
+        capture_output=True,
+        **SUBPROCESS_TEXT_KWARGS,
+        check=False,
+        timeout=10,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    processes: List[GatewayProcessInfo] = []
+    seen_pids: set[int] = set()
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.isdigit():
+            continue
+        pid = int(line)
+        if pid <= 0 or pid in seen_pids:
+            continue
+        seen_pids.add(pid)
+        processes.append(GatewayProcessInfo(pid=pid, name=_process_name_linux(pid)))
+    return processes
+
+
+def _process_name_linux(pid: int) -> str:
+    if pid <= 0:
+        return "system"
+    try:
+        cmdline = (Path("/proc") / str(pid) / "cmdline").read_text(errors="replace").replace("\x00", " ").strip()
+        if cmdline:
+            return Path(cmdline.split()[0]).name or "unknown"
+    except (OSError, FileNotFoundError):
+        pass
+    try:
+        comm = (Path("/proc") / str(pid) / "comm").read_text(errors="replace").strip()
+        if comm:
+            return comm
+    except (OSError, FileNotFoundError):
+        pass
+    return "unknown"
+
+
 def _process_name_windows(pid: int) -> str:
     if pid <= 0:
         return "system"
@@ -139,10 +182,52 @@ def _process_name_windows(pid: int) -> str:
     return name or "unknown"
 
 
+def _port_processes(port: int) -> List[GatewayProcessInfo]:
+    if os.name == "nt":
+        return _port_processes_windows(port)
+    return _port_processes_linux(port)
+
+
 def get_gateway_status(port: Optional[int] = None) -> GatewayStatus:
     port = port or gateway_port()
-    processes = _port_processes_windows(port)
+    processes = _port_processes(port)
     return GatewayStatus(port=port, occupied=bool(processes), processes=processes)
+
+
+def _stop_gateway_linux(port: int) -> GatewayStatus:
+    status = get_gateway_status(port)
+    if not status.occupied:
+        return status
+
+    for process in status.processes:
+        if process.pid <= 0:
+            continue
+        try:
+            os.kill(process.pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+
+    for _ in range(10):
+        time.sleep(0.5)
+        current_status = get_gateway_status(status.port)
+        if not current_status.occupied:
+            return current_status
+
+    for process in status.processes:
+        if process.pid <= 0:
+            continue
+        try:
+            os.kill(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+
+    for _ in range(10):
+        time.sleep(0.5)
+        current_status = get_gateway_status(status.port)
+        if not current_status.occupied:
+            return current_status
+
+    return get_gateway_status(status.port)
 
 
 def stop_gateway(port: Optional[int] = None) -> GatewayStatus:
@@ -151,7 +236,7 @@ def stop_gateway(port: Optional[int] = None) -> GatewayStatus:
         return status
 
     if os.name != "nt":
-        raise NotImplementedError("This tool currently supports Windows only.")
+        return _stop_gateway_linux(status.port)
 
     target_pids = [process.pid for process in status.processes if process.pid > 0]
 
