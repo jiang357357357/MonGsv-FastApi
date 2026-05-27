@@ -11,6 +11,8 @@ PREROLL_MS = 1200
 PREROLL_BYTES = int(16000 * 2 * PREROLL_MS / 1000)
 END_SILENCE_CHUNKS = 9
 MIN_FINAL_BYTES = 3200
+LOW_VOLUME_LEVEL = 0.015
+CLIPPING_LEVEL = 0.98
 
 
 class ASRFinalWebSocketHandler:
@@ -33,6 +35,10 @@ class ASRFinalWebSocketHandler:
         self.vad_hit_count = 0
         self.segment_index = 0
         self.accumulated_text = ""
+        self.speech_ms = 0
+        self.silence_ms = 0
+        self.noise_level = 0.0
+        self.low_volume_chunks = 0
 
     def _reset_session_state(self):
         self.audio_buffer = bytearray()
@@ -46,18 +52,37 @@ class ASRFinalWebSocketHandler:
         self.vad_hit_count = 0
         self.segment_index = 0
         self.accumulated_text = ""
+        self.speech_ms = 0
+        self.silence_ms = 0
+        self.noise_level = 0.0
+        self.low_volume_chunks = 0
 
     async def handle_connect(self, websocket):
         self._reset_session_state()
         await websocket.send_json({
             "type": "connection",
             "status": "connected",
-            "message": "VAD final 识别已就绪",
+            "message": "VAD final STT 已就绪",
+            "protocol": "vad-final-v1",
+            "audio_format": {
+                "sample_rate": self.sample_rate,
+                "channels": 1,
+                "sample_format": "s16le",
+            },
         })
 
     async def handle_audio(self, websocket, bytes_data):
         if not bytes_data:
             return
+        if len(bytes_data) % 2 != 0:
+            await self._send_warning(
+                websocket,
+                "AUDIO_FORMAT_UNSUPPORTED",
+                "音频必须是 16kHz/mono/signed int16/little-endian 裸 PCM",
+            )
+            bytes_data = bytes_data[:-1]
+            if not bytes_data:
+                return
         self.raw_pcm.extend(bytes_data)
         self.audio_buffer.extend(bytes_data)
         while len(self.audio_buffer) >= VAD_CHUNK_BYTES:
@@ -97,6 +122,8 @@ class ASRFinalWebSocketHandler:
             await self._finalize_pcm(websocket, bytes(self.raw_pcm), source="raw-fallback")
         elif not self.accumulated_text:
             print("[WS-ASR-FINAL] 没有可识别音频，返回空结果")
+            await self._send_warning(websocket, "NO_SPEECH", "未检测到有效人声")
+            await self._send_commit_hint(websocket, "manual_stop", False)
 
         await websocket.send_json({
             "type": "status",
@@ -114,6 +141,7 @@ class ASRFinalWebSocketHandler:
         if len(audio_array) == 0:
             return
         audio_float = audio_array.astype(np.float32) / 32768.0
+        audio_state = self._get_audio_state(audio_float)
 
         from asgiref.sync import sync_to_async
         vad_result = await sync_to_async(voice_service.vad.detect_streaming)(
@@ -130,10 +158,31 @@ class ASRFinalWebSocketHandler:
         self.vad_process_count += 1
         if is_speech:
             self.vad_hit_count += 1
+            self.speech_ms += VAD_CHUNK_MS
+            self.silence_ms = 0
+        else:
+            self.silence_ms += VAD_CHUNK_MS
+            self.speech_ms = 0
+            self._update_noise_level(audio_state["input_level"])
         if self.vad_process_count % 10 == 1 or is_speech or is_final:
             print(f"[WS-ASR-FINAL] VAD #{self.vad_process_count} speech={is_speech} "
                   f"speaking={self.is_speaking} silence={self.silence_count} "
                   f"endpoint={endpoint} final={is_final} segments={segments}")
+
+        if audio_state["input_level"] < LOW_VOLUME_LEVEL:
+            self.low_volume_chunks += 1
+        else:
+            self.low_volume_chunks = 0
+        if self.low_volume_chunks == 10:
+            await self._send_warning(websocket, "LOW_VOLUME", "输入音量过低")
+
+        await websocket.send_json(audio_state)
+        await websocket.send_json({
+            "type": "voice_activity",
+            "is_speech": is_speech,
+            "silence_ms": self.silence_ms,
+            "speech_ms": self.speech_ms,
+        })
 
         if is_speech:
             if not self.is_speaking:
@@ -179,6 +228,7 @@ class ASRFinalWebSocketHandler:
         duration = len(speech_array) / self.sample_rate
         if len(pcm_data) < MIN_FINAL_BYTES:
             print(f"[WS-ASR-FINAL] 语音过短 ({duration:.2f}s)，跳过")
+            await self._send_warning(websocket, "NO_SPEECH", "语音过短，未检测到有效人声")
             return
 
         speech_float = speech_array.astype(np.float32) / 32768.0
@@ -186,6 +236,7 @@ class ASRFinalWebSocketHandler:
         energy_db = 20 * np.log10(rms + 1e-10)
         if energy_db < -50:
             print(f"[WS-ASR-FINAL] 能量过低 ({energy_db:.1f}dB)，跳过")
+            await self._send_warning(websocket, "LOW_VOLUME", "输入音量过低")
             return
 
         print(f"[WS-ASR-FINAL] 最终确认[{source}]: {len(pcm_data)}B, {duration:.2f}s, {energy_db:.1f}dB")
@@ -199,6 +250,7 @@ class ASRFinalWebSocketHandler:
                 text = punctuated
         if not text:
             print(f"[WS-ASR-FINAL] {source} 未识别到文本，跳过 result")
+            await self._send_warning(websocket, "NO_SPEECH", "未识别到有效文本")
             return
 
         self.segment_index += 1
@@ -228,12 +280,61 @@ class ASRFinalWebSocketHandler:
             "speaker_similarity": speaker_info.get("similarity") if speaker_info else None,
             "speaker_is_known": speaker_info.get("is_known") if speaker_info else None,
         })
+        await self._send_commit_hint(websocket, self._commit_reason(source, text), True)
         print(f"[WS-ASR-FINAL] final#{self.segment_index}: '{text}', accumulated: '{self.accumulated_text}'")
 
     def _append_preroll(self, audio_data: bytes):
         self.pre_speech_pcm.extend(audio_data)
         if len(self.pre_speech_pcm) > PREROLL_BYTES:
             del self.pre_speech_pcm[:len(self.pre_speech_pcm) - PREROLL_BYTES]
+
+    def _get_audio_state(self, audio_float):
+        if len(audio_float) == 0:
+            input_level = 0.0
+            peak = 0.0
+        else:
+            rms = float(np.sqrt(np.mean(audio_float ** 2)))
+            peak = float(np.max(np.abs(audio_float)))
+            input_level = min(1.0, rms * 8.0)
+        return {
+            "type": "audio_state",
+            "input_level": round(input_level, 4),
+            "noise_level": round(self.noise_level, 4),
+            "clipping": peak >= CLIPPING_LEVEL,
+        }
+
+    def _update_noise_level(self, input_level: float):
+        if self.noise_level <= 0:
+            self.noise_level = input_level
+        else:
+            self.noise_level = self.noise_level * 0.9 + input_level * 0.1
+
+    async def _send_warning(self, websocket, code: str, message: str):
+        await websocket.send_json({
+            "type": "warning",
+            "code": code,
+            "message": message,
+        })
+
+    async def _send_commit_hint(self, websocket, reason: str, should_commit: bool):
+        await websocket.send_json({
+            "type": "commit_hint",
+            "reason": reason,
+            "should_commit": should_commit,
+            "final_text": self.accumulated_text,
+        })
+
+    @staticmethod
+    def _commit_reason(source: str, text: str) -> str:
+        if source == "stop-segment":
+            return "manual_stop"
+        if source == "raw-fallback":
+            return "manual_stop"
+        if source == "silence-end":
+            return "silence"
+        if text and text[-1] in PUNCTUATION_CHARS:
+            return "sentence_end"
+        return "silence"
 
     @staticmethod
     def _has_endpoint(segments) -> bool:

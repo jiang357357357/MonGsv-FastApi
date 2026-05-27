@@ -211,12 +211,16 @@ class LegacyFunasrEngine:
     def transcribe_array(self, audio_array: np.ndarray, sample_rate: int = 16000, language: str = "zh") -> dict:
         import tempfile
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp.close()
         try:
             soundfile.write(tmp.name, audio_array, sample_rate)
             return self.transcribe(tmp.name, language)
         finally:
             if os.path.exists(tmp.name):
-                os.unlink(tmp.name)
+                try:
+                    os.unlink(tmp.name)
+                except PermissionError as exc:
+                    print(f"[ASR] 临时文件删除失败（跳过）: {exc}")
 
     def batch_transcribe(self, input_path: str, language: str = "zh") -> Tuple[str, List[Dict[str, str]]]:
         model = self._get_model(language)
