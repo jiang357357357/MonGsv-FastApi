@@ -4,6 +4,7 @@ import os
 import numpy as np
 from Code.FastApi.Base.ASR.services import voice_service
 
+PUNCTUATION_CHARS = set("，。！？；：、,.!?;:")
 VAD_CHUNK_MS = 200
 VAD_CHUNK_BYTES = 6400
 STREAM_CHUNK_BYTES = 19200
@@ -84,12 +85,17 @@ class ASRWebSocketHandler:
             self.audio_buffer = bytearray()
             await self._process_vad(websocket, chunk, is_final=True)
 
-        if self.speech_pcm:
+        if len(self.raw_pcm) >= MIN_FINAL_BYTES:
+            self.asr_pending = bytearray()
+            await self._finalize_pcm(
+                websocket,
+                bytes(self.raw_pcm),
+                source="raw-final",
+                replace_accumulated=True,
+            )
+        elif self.speech_pcm:
             self.asr_pending = bytearray()
             await self._finalize_speech_segment(websocket)
-        elif not self.accumulated_text and len(self.raw_pcm) >= MIN_FINAL_BYTES:
-            print("[WS-ASR] VAD 未命中有效语音，使用整段 PCM 兜底识别")
-            await self._finalize_pcm(websocket, bytes(self.raw_pcm), source="raw-fallback")
         elif not self.accumulated_text:
             print("[WS-ASR] 没有可识别音频，返回空结果")
         await websocket.send_json({
@@ -191,7 +197,10 @@ class ASRWebSocketHandler:
     async def _finalize_speech_segment(self, websocket):
         await self._finalize_pcm(websocket, bytes(self.speech_pcm), source="vad-segment")
 
-    async def _finalize_pcm(self, websocket, pcm_data: bytes, source: str):
+    def _should_punctuate(self, text: str) -> bool:
+        return bool(text) and not any(ch in PUNCTUATION_CHARS for ch in text)
+
+    async def _finalize_pcm(self, websocket, pcm_data: bytes, source: str, replace_accumulated: bool = False):
         speech_array = np.frombuffer(pcm_data, dtype=np.int16)
         if len(speech_array) == 0:
             print(f"[WS-ASR] {source} 为空，跳过")
@@ -212,12 +221,15 @@ class ASRWebSocketHandler:
         text = result.get("text", "").strip()
         if not text:
             text = self.last_interim
-        if text:
+        if self._should_punctuate(text):
             punctuated = await sync_to_async(voice_service.asr.punctuate)(text)
             if punctuated:
                 text = punctuated
 
-        self.accumulated_text = (self.accumulated_text + " " + text).strip()
+        if replace_accumulated:
+            self.accumulated_text = text
+        else:
+            self.accumulated_text = (self.accumulated_text + " " + text).strip()
 
         speaker_info = None
         try:
