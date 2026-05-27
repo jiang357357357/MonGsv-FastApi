@@ -47,6 +47,7 @@ class InferenceConfig(BaseModel):
     super_sampling: bool = Field(default=False, description="是否启用超分")
     streaming_mode: bool = Field(default=False, description="是否流式推理")
     return_fragment: bool = Field(default=False, description="是否返回分段音频")
+    use_cuda_graph: bool = Field(default=False, description="是否尝试使用 CUDA Graph 加速普通推理")
 
 
 class InferenceRequest(BaseModel):
@@ -352,6 +353,7 @@ class InferenceService:
             "sample_steps": int(request.config.sample_steps),
             "super_sampling": request.config.if_sr or request.config.super_sampling,
             "streaming_mode": request.config.streaming_mode,
+            "use_cuda_graph": request.config.use_cuda_graph,
         }
 
     def _run_tts(self, inputs: Dict[str, Any]) -> tuple[int, np.ndarray]:

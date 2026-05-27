@@ -18,7 +18,7 @@ import traceback
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Body
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Body, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -156,6 +156,7 @@ class RoleEmotionSynthesisRequest(BaseModel):
     ref_free: bool = False
     if_freeze: bool = False
     pause_second: float = 0.3
+    use_cuda_graph: bool = False
     return_base64: bool = True
 
 
@@ -979,6 +980,7 @@ async def text_to_speech(
     ref_free: bool = Form(default=False),
     if_freeze: bool = Form(default=False),
     pause_second: float = Form(default=0.3),
+    use_cuda_graph: bool = Form(default=False),
     return_base64: bool = Form(default=True),
     user: Any = Depends(get_current_user),
 ):
@@ -1020,6 +1022,7 @@ async def text_to_speech(
                     ref_free=ref_free,
                     if_freeze=if_freeze,
                     pause_second=pause_second,
+                    use_cuda_graph=use_cuda_graph,
                 ),
                 return_base64=return_base64,
             )
@@ -1102,6 +1105,7 @@ async def synthesize_role_emotion(
                 ref_free=payload.ref_free,
                 if_freeze=payload.if_freeze,
                 pause_second=payload.pause_second,
+                use_cuda_graph=payload.use_cuda_graph,
             ),
             return_base64=payload.return_base64,
         )
@@ -1634,7 +1638,7 @@ from Code.FastApi.Base.ASR import voice_service as asr_voice_service
 
 
 @app.websocket("/ws/asr/transcribe")
-async def ws_asr_transcribe(websocket):
+async def ws_asr_transcribe(websocket: WebSocket):
     from Code.FastApi.Base.ASR.consumers.asr import ASRWebSocketHandler
     handler = ASRWebSocketHandler()
     await websocket.accept()
@@ -1653,7 +1657,7 @@ async def ws_asr_transcribe(websocket):
 
 
 @app.websocket("/ws/asr/vad")
-async def ws_asr_vad(websocket):
+async def ws_asr_vad(websocket: WebSocket):
     from Code.FastApi.Base.ASR.consumers.vad import VADWebSocketHandler
     handler = VADWebSocketHandler()
     await websocket.accept()

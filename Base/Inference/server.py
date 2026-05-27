@@ -95,7 +95,8 @@ async def inference_with_file_endpoint(
     top_p: float = Form(default=0.6, description="Top-P采样参数"),
     temperature: float = Form(default=0.6, description="温度参数"),
     speed: float = Form(default=1.0, description="语速调节"),
-    how_to_cut: str = Form(default="不切", description="文本切分方式")
+    how_to_cut: str = Form(default="不切", description="文本切分方式"),
+    use_cuda_graph: bool = Form(default=False, description="尝试使用 CUDA Graph 加速普通推理")
 ):
     """
     使用文件上传的语音合成推理
@@ -120,7 +121,8 @@ async def inference_with_file_endpoint(
             top_p=top_p,
             temperature=temperature,
             speed=speed,
-            how_to_cut=how_to_cut
+            how_to_cut=how_to_cut,
+            use_cuda_graph=use_cuda_graph,
         )
         
         request = InferenceRequest(
