@@ -1652,8 +1652,29 @@ async def ws_asr_transcribe(websocket: WebSocket):
                     await handler.handle_audio(websocket, payload)
                 elif "text" in raw:
                     await handler.handle_text(websocket, raw["text"])
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[WS-ASR] WebSocket异常: {exc}")
+
+
+@app.websocket("/ws/asr/final")
+async def ws_asr_final(websocket: WebSocket):
+    from Code.FastApi.Base.ASR.consumers.final import ASRFinalWebSocketHandler
+    handler = ASRFinalWebSocketHandler()
+    await websocket.accept()
+    await handler.handle_connect(websocket)
+    try:
+        while True:
+            raw = await websocket.receive()
+            if raw.get("type") == "websocket.receive":
+                if "bytes" in raw:
+                    payload = raw["bytes"]
+                    await handler.handle_audio(websocket, payload)
+                elif "text" in raw:
+                    await handler.handle_text(websocket, raw["text"])
+            elif raw.get("type") == "websocket.disconnect":
+                break
+    except Exception as exc:
+        print(f"[WS-ASR-FINAL] WebSocket异常: {exc}")
 
 
 @app.websocket("/ws/asr/vad")

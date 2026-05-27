@@ -7,6 +7,8 @@ from Code.FastApi.Base.ASR.services import voice_service
 PUNCTUATION_CHARS = set("，。！？；：、,.!?;:")
 VAD_CHUNK_MS = 200
 VAD_CHUNK_BYTES = 6400
+PREROLL_MS = 1200
+PREROLL_BYTES = int(16000 * 2 * PREROLL_MS / 1000)
 STREAM_CHUNK_BYTES = 19200
 SILENCE_LIMIT = 20
 MIN_FINAL_BYTES = 3200
@@ -16,7 +18,7 @@ class ASRWebSocketHandler:
     def __init__(self):
         self.audio_buffer = bytearray()
         self.raw_pcm = bytearray()
-        self.recent_chunks = []
+        self.pre_speech_pcm = bytearray()
         self.sample_rate = 16000
         self.vad_cache = {}
         self.is_speaking = False
@@ -32,7 +34,7 @@ class ASRWebSocketHandler:
     def _reset_session_state(self):
         self.audio_buffer = bytearray()
         self.raw_pcm = bytearray()
-        self.recent_chunks = []
+        self.pre_speech_pcm = bytearray()
         self.vad_cache = {}
         self.is_speaking = False
         self.silence_count = 0
@@ -139,20 +141,20 @@ class ASRWebSocketHandler:
                 self.asr_pending = bytearray()
                 self.speech_pcm = bytearray()
                 self.last_interim = ""
-                if self.recent_chunks:
-                    lb = b"".join(self.recent_chunks)
-                    self.asr_pending.extend(lb)
-                    self.speech_pcm.extend(lb)
-                self.recent_chunks = []
+                if self.pre_speech_pcm:
+                    preroll = bytes(self.pre_speech_pcm)
+                    self.asr_pending.extend(preroll)
+                    self.speech_pcm.extend(preroll)
+                    print(f"[WS-ASR] 带入前置音频: {len(preroll)}B/{len(preroll) / 2 / self.sample_rate:.2f}s")
+                self.pre_speech_pcm = bytearray()
             self.asr_pending.extend(audio_data)
             self.speech_pcm.extend(audio_data)
             if len(self.asr_pending) >= STREAM_CHUNK_BYTES:
                 await self._flush_interim(websocket)
         else:
-            self.recent_chunks.append(audio_data)
-            if len(self.recent_chunks) > 3:
-                self.recent_chunks.pop(0)
-            if self.is_speaking:
+            if not self.is_speaking:
+                self._append_preroll(audio_data)
+            else:
                 self.asr_pending.extend(audio_data)
                 self.speech_pcm.extend(audio_data)
                 self.silence_count += 1
@@ -167,12 +169,17 @@ class ASRWebSocketHandler:
                     else:
                         print(f"[WS-ASR] <<< 语音结束 ({self.silence_count} 次静音)")
                         self.vad_cache = {}
-                        self.recent_chunks = []
+                        self.pre_speech_pcm = bytearray()
                         self.asr_pending = bytearray()
                         await self._finalize_speech_segment(websocket)
                         self.is_speaking = False
                         self.silence_count = 0
                         self.speech_pcm = bytearray()
+
+    def _append_preroll(self, audio_data: bytes):
+        self.pre_speech_pcm.extend(audio_data)
+        if len(self.pre_speech_pcm) > PREROLL_BYTES:
+            del self.pre_speech_pcm[:len(self.pre_speech_pcm) - PREROLL_BYTES]
 
     async def _flush_interim(self, websocket):
         chunk = bytes(self.asr_pending)
