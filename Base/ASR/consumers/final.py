@@ -9,7 +9,7 @@ VAD_CHUNK_MS = 200
 VAD_CHUNK_BYTES = 6400
 PREROLL_MS = 1200
 PREROLL_BYTES = int(16000 * 2 * PREROLL_MS / 1000)
-END_SILENCE_CHUNKS = 5
+END_SILENCE_CHUNKS = 9
 MIN_FINAL_BYTES = 3200
 
 
@@ -140,8 +140,6 @@ class ASRFinalWebSocketHandler:
                 self._start_speech_segment()
             self.speech_pcm.extend(audio_data)
             self.silence_count = 0
-            if endpoint:
-                await self._finalize_current_segment(websocket, source="vad-endpoint")
             return
 
         if not self.is_speaking:
@@ -207,13 +205,14 @@ class ASRFinalWebSocketHandler:
         self.accumulated_text = (self.accumulated_text + " " + text).strip()
 
         speaker_info = None
-        try:
-            threshold = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.75"))
-            speaker_info = await sync_to_async(voice_service.identify_speaker_from_array)(
-                speech_float, self.sample_rate, threshold,
-            )
-        except Exception as exc:
-            print(f"[WS-ASR-FINAL] 声纹识别失败（跳过）: {exc}")
+        if os.getenv("ENABLE_ASR_SPEAKER", "").lower() in {"1", "true", "yes"}:
+            try:
+                threshold = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.75"))
+                speaker_info = await sync_to_async(voice_service.identify_speaker_from_array)(
+                    speech_float, self.sample_rate, threshold,
+                )
+            except Exception as exc:
+                print(f"[WS-ASR-FINAL] 声纹识别失败（跳过）: {exc}")
 
         await websocket.send_json({
             "type": "result",
