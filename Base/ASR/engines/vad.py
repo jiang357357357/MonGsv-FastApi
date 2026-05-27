@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+from pathlib import Path
 from funasr import AutoModel
 
 
@@ -32,10 +33,21 @@ class SileroVAD:
 
 class VADManager:
     def __init__(self):
-        self.model_id = "fsmn-vad"
+        self.model_id = self._resolve_model_id()
         print(f"[VAD] 加载 FSMN VAD 模型: {self.model_id}")
-        self.model = AutoModel(model=self.model_id, model_revision="v2.0.4")
+        self.model = AutoModel(
+            model=self.model_id,
+            model_revision="v2.0.4",
+            disable_update=True,
+        )
         print("[VAD] FSMN VAD 加载完成")
+
+    def _resolve_model_id(self):
+        for parent in Path(__file__).resolve().parents:
+            local_model = parent / "tools" / "asr" / "models" / "speech_fsmn_vad_zh-cn-16k-common-pytorch"
+            if local_model.exists():
+                return str(local_model)
+        return "fsmn-vad"
 
     def detect_streaming(self, audio_data, cache, is_final=False, chunk_size=200,
                          speech_noise_thres=0.6, min_speech_duration_ms=250):
