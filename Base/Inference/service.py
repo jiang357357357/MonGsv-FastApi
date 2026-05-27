@@ -375,6 +375,47 @@ class InferenceService:
 
         return sample_rate, np.concatenate(audio_fragments, axis=0)
 
+    def stream_inference(self, request: InferenceRequest):
+        """执行流式推理，逐块产出官方 TTS 音频片段。
+
+        该方法是同步生成器，供 WebSocket worker 在线程中调用。
+        """
+        temp_audio_path = None
+        temp_created = False
+        model_key = self.get_current_model_key()
+
+        try:
+            if self.tts_pipeline is None:
+                raise RuntimeError("模型未加载，请先加载 GPT 和 SoVITS 模型")
+
+            self.residency_manager.begin_request(model_key)
+            print(f"[inference-residency] 开始流式推理: model_key={model_key}")
+            temp_audio_path, temp_created = self._process_audio_input(request)
+            stream_request = request.copy(deep=True)
+            stream_request.config.streaming_mode = True
+            stream_request.config.return_fragment = False
+            stream_request.config.parallel_infer = False
+            stream_request.config.split_bucket = False
+            stream_request.config.use_cuda_graph = False
+            inputs = self._build_tts_inputs(stream_request, temp_audio_path)
+
+            emitted = False
+            for current_sr, audio in self.tts_pipeline.run(inputs):
+                if audio is None or len(audio) == 0:
+                    continue
+                emitted = True
+                yield current_sr, np.asarray(audio)
+
+            if not emitted:
+                raise RuntimeError("流式推理未生成音频数据")
+        finally:
+            self.residency_manager.end_request(model_key)
+            if model_key:
+                print(f"[inference-residency] 结束流式推理: model_key={model_key}")
+            self.cleanup_resident_models()
+            if temp_created and temp_audio_path and os.path.exists(temp_audio_path):
+                os.unlink(temp_audio_path)
+
     def _encode_audio_to_base64(self, audio_data: np.ndarray, sample_rate: int, format: str = "wav") -> str:
         """将音频编码为 Base64。"""
         buffer = io.BytesIO()

@@ -280,7 +280,7 @@ def print_startup_info(args, mon_config: MonConfig):
         ("数据准备", [("POST", "/data-prep/audio-slice/process", "音频切分"), ("POST", "/data-prep/asr/recognize", "ASR识别")]),
         ("数据格式化", [("POST", "/dataset/text/extract", "文本特征提取"), ("POST", "/dataset/audio/extract", "音频特征提取"), ("POST", "/dataset/semantic/encode", "语义编码")]),
         ("模型训练", [("POST", "/training/gpt/start", "GPT训练"), ("POST", "/training/sovits/start", "SoVITS训练"), ("GET", "/training/status/{job_id}", "训练状态")]),
-        ("推理服务", [("POST", "/inference/tts", "文本转语音")]),
+        ("推理服务", [("POST", "/inference/tts", "文本转语音"), ("WS", "/ws/tts/stream", "流式文本转语音")]),
         ("工作流", [("POST", "/workflow/complete", "完整流程/可选带训练"), ("POST", "/workflow/training/full", "预处理到训练的引导流程"), ("POST", "/batch/projects", "批量处理")]),
         ("管理监控", [("GET", "/health", "健康检查"), ("GET", "/services/status", "服务状态"), ("GET", "/monhub/status", "MonHub注册状态")]),
     ]

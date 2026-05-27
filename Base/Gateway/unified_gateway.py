@@ -1675,6 +1675,31 @@ async def ws_asr_vad(websocket: WebSocket):
         pass
 
 
+@app.websocket("/ws/tts/stream")
+async def ws_tts_stream(websocket: WebSocket):
+    from Code.FastApi.Base.TTS.consumers.stream import TTSStreamWebSocketHandler
+
+    service = _ensure_service("inference")
+    handler = TTSStreamWebSocketHandler(service)
+    await websocket.accept()
+    await handler.handle_connect(websocket)
+    try:
+        while True:
+            raw = await websocket.receive()
+            if raw.get("type") == "websocket.receive":
+                if "text" in raw:
+                    await handler.handle_text(websocket, raw["text"])
+            elif raw.get("type") == "websocket.disconnect":
+                break
+    except Exception as exc:
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+        except Exception:
+            pass
+    finally:
+        await handler.handle_disconnect()
+
+
 @app.post("/asr/speaker/register/")
 async def asr_speaker_register(
     audio_file: UploadFile = File(...),
