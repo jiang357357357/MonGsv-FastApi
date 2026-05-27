@@ -4,13 +4,17 @@ import os
 import numpy as np
 from Code.FastApi.Base.ASR.services import voice_service
 
-STREAM_CHUNK_BYTES = 9600
+VAD_CHUNK_MS = 200
+VAD_CHUNK_BYTES = 6400
+STREAM_CHUNK_BYTES = 19200
 SILENCE_LIMIT = 20
+MIN_FINAL_BYTES = 3200
 
 
 class ASRWebSocketHandler:
     def __init__(self):
-        self.audio_buffer = []
+        self.audio_buffer = bytearray()
+        self.raw_pcm = bytearray()
         self.recent_chunks = []
         self.sample_rate = 16000
         self.vad_cache = {}
@@ -22,19 +26,25 @@ class ASRWebSocketHandler:
         self.asr_pending = bytearray()
         self.speech_pcm = bytearray()
         self.last_interim = ""
+        self.vad_hit_count = 0
 
-    async def handle_connect(self, websocket):
-        self.audio_buffer = []
+    def _reset_session_state(self):
+        self.audio_buffer = bytearray()
+        self.raw_pcm = bytearray()
         self.recent_chunks = []
         self.vad_cache = {}
         self.is_speaking = False
         self.silence_count = 0
         self.accumulated_text = ""
         self.vad_process_count = 0
+        self.vad_hit_count = 0
         self.asr_cache = {}
         self.asr_pending = bytearray()
         self.speech_pcm = bytearray()
         self.last_interim = ""
+
+    async def handle_connect(self, websocket):
+        self._reset_session_state()
         await websocket.send_json({
             "type": "connection",
             "status": "connected",
@@ -42,10 +52,14 @@ class ASRWebSocketHandler:
         })
 
     async def handle_audio(self, websocket, bytes_data):
-        self.audio_buffer.append(bytes_data)
-        total_size = sum(len(c) for c in self.audio_buffer)
-        if total_size >= 4096:
-            await self._process_vad(websocket)
+        if not bytes_data:
+            return
+        self.raw_pcm.extend(bytes_data)
+        self.audio_buffer.extend(bytes_data)
+        while len(self.audio_buffer) >= VAD_CHUNK_BYTES:
+            chunk = bytes(self.audio_buffer[:VAD_CHUNK_BYTES])
+            del self.audio_buffer[:VAD_CHUNK_BYTES]
+            await self._process_vad(websocket, chunk, is_final=False)
 
     async def handle_text(self, websocket, text_data):
         data = json.loads(text_data)
@@ -57,26 +71,27 @@ class ASRWebSocketHandler:
 
     async def _on_start(self, websocket):
         print("[WS-ASR] 开始录音 (2-pass)")
-        self.audio_buffer = []
-        self.recent_chunks = []
-        self.vad_cache = {}
-        self.is_speaking = False
-        self.silence_count = 0
-        self.accumulated_text = ""
-        self.vad_process_count = 0
-        self.asr_cache = {}
-        self.asr_pending = bytearray()
-        self.speech_pcm = bytearray()
-        self.last_interim = ""
+        self._reset_session_state()
         await websocket.send_json({"type": "status", "message": "开始录音"})
 
     async def _on_stop(self, websocket):
-        print("[WS-ASR] 停止录音")
+        raw_duration = len(self.raw_pcm) / 2 / self.sample_rate if self.raw_pcm else 0
+        print(f"[WS-ASR] 停止录音: raw={len(self.raw_pcm)}B/{raw_duration:.2f}s "
+              f"vad_calls={self.vad_process_count} vad_hits={self.vad_hit_count} "
+              f"pending={len(self.audio_buffer)}B speech={len(self.speech_pcm)}B")
+        if self.audio_buffer:
+            chunk = bytes(self.audio_buffer)
+            self.audio_buffer = bytearray()
+            await self._process_vad(websocket, chunk, is_final=True)
+
         if self.speech_pcm:
             self.asr_pending = bytearray()
             await self._finalize_speech_segment(websocket)
-        else:
-            self.accumulated_text = ""
+        elif not self.accumulated_text and len(self.raw_pcm) >= MIN_FINAL_BYTES:
+            print("[WS-ASR] VAD 未命中有效语音，使用整段 PCM 兜底识别")
+            await self._finalize_pcm(websocket, bytes(self.raw_pcm), source="raw-fallback")
+        elif not self.accumulated_text:
+            print("[WS-ASR] 没有可识别音频，返回空结果")
         await websocket.send_json({
             "type": "status",
             "message": "录音结束",
@@ -86,23 +101,28 @@ class ASRWebSocketHandler:
         self.is_speaking = False
         self.silence_count = 0
 
-    async def _process_vad(self, websocket):
-        if not self.audio_buffer:
+    async def _process_vad(self, websocket, audio_data: bytes, is_final: bool = False):
+        if not audio_data:
             return
-        audio_data = b"".join(self.audio_buffer)
         audio_array = np.frombuffer(audio_data, dtype=np.int16)
+        if len(audio_array) == 0:
+            return
         audio_float = audio_array.astype(np.float32) / 32768.0
 
         from asgiref.sync import sync_to_async
         vad_result = await sync_to_async(voice_service.vad.detect_streaming)(
-            audio_float, self.vad_cache, is_final=False, chunk_size=200,
+            audio_float, self.vad_cache, is_final=is_final, chunk_size=VAD_CHUNK_MS,
             speech_noise_thres=0.6, min_speech_duration_ms=250,
         )
         is_speech = vad_result["is_speech"]
+        segments = vad_result.get("segments", [])
         self.vad_process_count += 1
-        if self.vad_process_count % 10 == 1:
+        if is_speech:
+            self.vad_hit_count += 1
+        if self.vad_process_count % 10 == 1 or is_speech or is_final:
             print(f"[WS-ASR] VAD #{self.vad_process_count} speech={is_speech} "
-                  f"speaking={self.is_speaking} silence={self.silence_count}")
+                  f"speaking={self.is_speaking} silence={self.silence_count} "
+                  f"final={is_final} segments={segments}")
 
         if is_speech:
             if not self.is_speaking:
@@ -147,7 +167,6 @@ class ASRWebSocketHandler:
                         self.is_speaking = False
                         self.silence_count = 0
                         self.speech_pcm = bytearray()
-        self.audio_buffer = []
 
     async def _flush_interim(self, websocket):
         chunk = bytes(self.asr_pending)
@@ -170,7 +189,13 @@ class ASRWebSocketHandler:
             })
 
     async def _finalize_speech_segment(self, websocket):
-        speech_array = np.frombuffer(bytes(self.speech_pcm), dtype=np.int16)
+        await self._finalize_pcm(websocket, bytes(self.speech_pcm), source="vad-segment")
+
+    async def _finalize_pcm(self, websocket, pcm_data: bytes, source: str):
+        speech_array = np.frombuffer(pcm_data, dtype=np.int16)
+        if len(speech_array) == 0:
+            print(f"[WS-ASR] {source} 为空，跳过")
+            return
         speech_float = speech_array.astype(np.float32) / 32768.0
         duration = len(speech_array) / self.sample_rate
         rms = np.sqrt(np.mean(speech_float ** 2))
@@ -180,7 +205,7 @@ class ASRWebSocketHandler:
             print(f"[WS-ASR] 能量过低 ({energy_db:.1f}dB)，跳过")
             return
 
-        print(f"[WS-ASR] 最终确认: {len(self.speech_pcm)}B, {duration:.2f}s, {energy_db:.1f}dB")
+        print(f"[WS-ASR] 最终确认[{source}]: {len(pcm_data)}B, {duration:.2f}s, {energy_db:.1f}dB")
 
         from asgiref.sync import sync_to_async
         result = await sync_to_async(voice_service.asr.transcribe_array)(speech_float, self.sample_rate)
