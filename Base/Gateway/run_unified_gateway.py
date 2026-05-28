@@ -8,6 +8,7 @@ GPT-SoVITS 统一网关启动脚本
 
 import argparse
 import os
+import socket
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,18 @@ from Code.runtime_env import ensure_audio_runtime
 current_dir = Path(__file__).resolve().parent
 if str(current_dir) not in sys.path:
     sys.path.insert(0, str(current_dir))
+
+
+def _detect_lan_ip() -> str:
+    """获取本机局域网 IP 地址。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
 
 
 def parse_args():
@@ -207,7 +220,7 @@ def setup_environment(args, mon_config: MonConfig):
 
     register_host = mon_config.get("monhub", "REGISTER_HOST")
     if not register_host:
-        register_host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
+        register_host = _detect_lan_ip() if args.host == "0.0.0.0" else args.host
 
     monhub_env = {
         "MONHUB_ENABLED": "true" if mon_config.get("monhub", "ENABLED", False, cast=bool) else "false",

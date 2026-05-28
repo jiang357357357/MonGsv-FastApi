@@ -157,6 +157,7 @@ class RoleEmotionSynthesisRequest(BaseModel):
     if_freeze: bool = False
     pause_second: float = 0.3
     use_cuda_graph: bool = False
+    cuda_graph_mode: str = "graph"
     return_base64: bool = True
 
 
@@ -981,6 +982,7 @@ async def text_to_speech(
     if_freeze: bool = Form(default=False),
     pause_second: float = Form(default=0.3),
     use_cuda_graph: bool = Form(default=False),
+    cuda_graph_mode: str = Form(default="graph"),
     return_base64: bool = Form(default=True),
     user: Any = Depends(get_current_user),
 ):
@@ -1023,6 +1025,7 @@ async def text_to_speech(
                     if_freeze=if_freeze,
                     pause_second=pause_second,
                     use_cuda_graph=use_cuda_graph,
+                    cuda_graph_mode=cuda_graph_mode,
                 ),
                 return_base64=return_base64,
             )
@@ -1106,6 +1109,7 @@ async def synthesize_role_emotion(
                 if_freeze=payload.if_freeze,
                 pause_second=payload.pause_second,
                 use_cuda_graph=payload.use_cuda_graph,
+                cuda_graph_mode=payload.cuda_graph_mode,
             ),
             return_base64=payload.return_base64,
         )

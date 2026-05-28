@@ -144,6 +144,9 @@ class MonHubBridge:
         registered = False
         try:
             hub_address = self._resolve_hub_address()
+            if hub_address is None:
+                self._set_status(error="UDP发现失败，未找到MonHub", connected=False, registered=False)
+                return
             self._set_status(hub_address=hub_address, error="")
 
             context = zmq.Context()
@@ -191,36 +194,40 @@ class MonHubBridge:
                     pass
             self._set_status(connected=False, registered=False)
 
-    def _resolve_hub_address(self) -> str:
+    def _resolve_hub_address(self) -> Optional[str]:
         if self.config.discovery_enabled:
             discovered = self._discover_hub_address()
             if discovered:
                 return discovered
-        return f"tcp://{self.config.hub_host}:{self.config.hub_port}"
+        return None
 
     def _discover_hub_address(self) -> Optional[str]:
         request = {
+            "protocol": "MonHub",
+            "version": "2.0.0",
+            "msg_id": str(uuid.uuid4()),
             "type": "SERVICE_DISCOVER",
             "source": self.config.service_id,
+            "target": "MonHub",
             "timestamp": _utc_now(),
             "payload": {},
         }
         data = json.dumps(request, ensure_ascii=False).encode("utf-8")
-        targets = [
-            ("255.255.255.255", self.config.discovery_port),
-            ("127.0.0.1", self.config.discovery_port),
-        ]
 
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
             udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            udp_socket.settimeout(1.0)
-            for target in targets:
+            udp_socket.settimeout(3.0)
+            for _ in range(2):
                 try:
-                    udp_socket.sendto(data, target)
+                    udp_socket.sendto(data, ("255.255.255.255", self.config.discovery_port))
                 except OSError:
-                    continue
-            end_at = time.monotonic() + 2.0
-            while time.monotonic() < end_at:
+                    pass
+                try:
+                    udp_socket.sendto(data, ("127.0.0.1", self.config.discovery_port))
+                except OSError:
+                    pass
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
                 try:
                     response_data, address = udp_socket.recvfrom(65535)
                 except socket.timeout:
@@ -229,12 +236,13 @@ class MonHubBridge:
                     response = json.loads(response_data.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
-                if response.get("type") != "DISCOVERY_RESPONSE":
+                if response.get("source") != "MonHub":
                     continue
-                payload = response.get("payload", {}) or {}
-                registry_info = payload.get("registry_info", {}) or {}
+                registry_info = response.get("payload", {}).get("registry_info", {}) or {}
                 hub_port = registry_info.get("hub_zmq_port") or self.config.hub_port
                 hub_ip = registry_info.get("registry_ip") or address[0]
+                if hub_ip in {"0.0.0.0", "127.0.0.1"} and address[0] not in {"127.0.0.1", "0.0.0.0"}:
+                    hub_ip = address[0]
                 return f"tcp://{hub_ip}:{hub_port}"
         return None
 
@@ -260,6 +268,9 @@ class MonHubBridge:
         except (UnicodeDecodeError, json.JSONDecodeError):
             return
         self._set_status(reply=reply)
+        if reply.get("payload", {}).get("error_code") == "RE_REGISTER_REQUIRED":
+            self._send(socket_obj, "SERVICE_REGISTER", self._service_payload())
+            self._set_status(registered=True)
 
     def _service_payload(self) -> dict[str, Any]:
         base_url = f"http://{self.config.register_host}:{self.config.register_port}"

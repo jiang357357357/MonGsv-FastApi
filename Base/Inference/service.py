@@ -11,6 +11,7 @@ import io
 import os
 import sys
 import tempfile
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,7 @@ class InferenceConfig(BaseModel):
     streaming_mode: bool = Field(default=False, description="是否流式推理")
     return_fragment: bool = Field(default=False, description="是否返回分段音频")
     use_cuda_graph: bool = Field(default=False, description="是否尝试使用 CUDA Graph 加速普通推理")
+    cuda_graph_mode: str = Field(default="graph", description="CUDA Graph模式: graph 或 decoder_only")
 
 
 class InferenceRequest(BaseModel):
@@ -190,7 +192,10 @@ class InferenceService:
             current_key = self.get_current_model_key()
             requested_key = self.residency_manager.build_model_key(gpt_path, sovits_path)
             if self.tts_pipeline is not None and current_key == requested_key:
-                print(f"[inference-residency] 命中已驻留模型: {os.path.basename(gpt_path)} / {os.path.basename(sovits_path)}")
+                print(
+                    f"[inference-residency] 命中已驻留模型: {os.path.basename(gpt_path)} / {os.path.basename(sovits_path)}",
+                    flush=True,
+                )
                 self.residency_manager.register_loaded(gpt_path, sovits_path)
                 return True
 
@@ -198,7 +203,11 @@ class InferenceService:
                 print("[inference-residency] 切换模型，卸载当前驻留模型")
                 self.unload_models(reason="switch")
 
-            print(f"[inference-residency] 加载模型: {os.path.basename(gpt_path)} / {os.path.basename(sovits_path)}")
+            load_started_at = time.perf_counter()
+            print(
+                f"[inference-residency] 加载模型: {os.path.basename(gpt_path)} / {os.path.basename(sovits_path)}",
+                flush=True,
+            )
             self._cleanup_runtime()
             self.tts_config = self._build_tts_config(gpt_path, sovits_path)
             self.tts_pipeline = self._TTS(self.tts_config)
@@ -209,7 +218,15 @@ class InferenceService:
             cleanup_result = self.cleanup_resident_models(force=True)
             if cleanup_result.get("unloaded"):
                 print(f"[inference-residency] 清理驻留模型: {cleanup_result['unloaded']}")
-            print("[inference-residency] 模型已驻留")
+            load_elapsed = time.perf_counter() - load_started_at
+            print(
+                "[inference-residency] 模型已驻留: "
+                f"elapsed={load_elapsed:.3f}s, "
+                f"version={self.model_version}, "
+                f"device={self.device}, "
+                f"is_half={self.is_half and str(self.device) != 'cpu'}",
+                flush=True,
+            )
             return True
         except Exception as exc:
             print(f"模型加载失败: {exc}")
@@ -354,6 +371,7 @@ class InferenceService:
             "super_sampling": request.config.if_sr or request.config.super_sampling,
             "streaming_mode": request.config.streaming_mode,
             "use_cuda_graph": request.config.use_cuda_graph,
+            "cuda_graph_mode": request.config.cuda_graph_mode,
         }
 
     def _run_tts(self, inputs: Dict[str, Any]) -> tuple[int, np.ndarray]:
@@ -383,6 +401,9 @@ class InferenceService:
         temp_audio_path = None
         temp_created = False
         model_key = self.get_current_model_key()
+        infer_started_at = time.perf_counter()
+        emitted_duration = 0.0
+        last_sample_rate = 0
 
         try:
             if self.tts_pipeline is None:
@@ -397,6 +418,7 @@ class InferenceService:
             stream_request.config.parallel_infer = False
             stream_request.config.split_bucket = False
             stream_request.config.use_cuda_graph = False
+            stream_request.config.cuda_graph_mode = "graph"
             inputs = self._build_tts_inputs(stream_request, temp_audio_path)
 
             emitted = False
@@ -404,14 +426,28 @@ class InferenceService:
                 if audio is None or len(audio) == 0:
                     continue
                 emitted = True
+                last_sample_rate = current_sr
+                emitted_duration += len(audio) / current_sr if current_sr else 0.0
                 yield current_sr, np.asarray(audio)
 
             if not emitted:
                 raise RuntimeError("流式推理未生成音频数据")
         finally:
+            elapsed = time.perf_counter() - infer_started_at
             self.residency_manager.end_request(model_key)
             if model_key:
-                print(f"[inference-residency] 结束流式推理: model_key={model_key}")
+                rtf = elapsed / emitted_duration if emitted_duration > 0 else 0.0
+                print(
+                    "[推理耗时] | 项目 | 值 |\n"
+                    "[推理耗时] | --- | ---: |\n"
+                    f"[推理耗时] | 类型 | 流式推理 |\n"
+                    f"[推理耗时] | 总耗时 | {elapsed:.3f}s |\n"
+                    f"[推理耗时] | 音频时长 | {emitted_duration:.3f}s |\n"
+                    f"[推理耗时] | RTF | {rtf:.3f} |\n"
+                    f"[推理耗时] | 采样率 | {last_sample_rate} |\n"
+                    f"[推理耗时] | 模型 | {model_key} |",
+                    flush=True,
+                )
             self.cleanup_resident_models()
             if temp_created and temp_audio_path and os.path.exists(temp_audio_path):
                 os.unlink(temp_audio_path)
@@ -442,9 +478,12 @@ class InferenceService:
     async def inference(self, request: InferenceRequest) -> InferenceResponse:
         """执行推理。"""
         start_time = datetime.now()
+        infer_started_at = time.perf_counter()
         temp_audio_path = None
         temp_created = False
         model_key = self.get_current_model_key()
+        sample_rate = 0
+        audio_duration = 0.0
 
         try:
             if self.tts_pipeline is None:
@@ -458,12 +497,12 @@ class InferenceService:
             sample_rate, audio_data = self._run_tts(inputs)
 
             processing_time = (datetime.now() - start_time).total_seconds()
-            duration = len(audio_data) / sample_rate if sample_rate else 0.0
+            audio_duration = len(audio_data) / sample_rate if sample_rate else 0.0
             response = InferenceResponse(
                 success=True,
                 message="推理完成",
                 sample_rate=sample_rate,
-                duration=duration,
+                duration=audio_duration,
                 processing_time=processing_time,
                 text_segments=text_segments,
             )
@@ -483,9 +522,24 @@ class InferenceService:
                 processing_time=(datetime.now() - start_time).total_seconds(),
             )
         finally:
+            elapsed = time.perf_counter() - infer_started_at
+            mode = request.config.cuda_graph_mode if request.config.use_cuda_graph else "normal"
             self.residency_manager.end_request(model_key)
             if model_key:
-                print(f"[inference-residency] 结束推理: model_key={model_key}")
+                rtf = elapsed / audio_duration if audio_duration > 0 else 0.0
+                print(
+                    "[推理耗时] | 项目 | 值 |\n"
+                    "[推理耗时] | --- | ---: |\n"
+                    f"[推理耗时] | 类型 | 普通请求 |\n"
+                    f"[推理耗时] | 推理模式 | {mode} |\n"
+                    f"[推理耗时] | CUDA Graph | {request.config.use_cuda_graph} |\n"
+                    f"[推理耗时] | 总耗时 | {elapsed:.3f}s |\n"
+                    f"[推理耗时] | 音频时长 | {audio_duration:.3f}s |\n"
+                    f"[推理耗时] | RTF | {rtf:.3f} |\n"
+                    f"[推理耗时] | 采样率 | {sample_rate} |\n"
+                    f"[推理耗时] | 模型 | {model_key} |",
+                    flush=True,
+                )
             self.cleanup_resident_models()
             if temp_created and temp_audio_path and os.path.exists(temp_audio_path):
                 os.unlink(temp_audio_path)
