@@ -23,8 +23,7 @@ class InferenceConfig(BaseModel):
     seed: int = Field(default=-1, description="随机种子")
     parallel_infer: bool = Field(default=True, description="并行推理")
     split_bucket: bool = Field(default=True, description="分桶处理")
-    use_cuda_graph: bool = Field(default=False, description="尝试使用 CUDA Graph 加速普通推理")
-    cuda_graph_mode: str = Field(default="graph", description="CUDA Graph模式: graph 或 decoder_only")
+    inference_mode: str = Field(default="normal", description="推理模式: normal 或 accelerated")
 
 
 class ModelConfig(BaseModel):

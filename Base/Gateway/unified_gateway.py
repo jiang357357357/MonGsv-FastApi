@@ -18,11 +18,11 @@ import traceback
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Body, WebSocket
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Body, WebSocket, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from Code.FastApi.Base.Hub.monhub_bridge import create_monhub_bridge_from_env
 from Code.FastApi.Base.monconfig import MonConfig
@@ -140,6 +140,8 @@ class TrainingWorkflowOptions(BaseModel):
 class RoleEmotionSynthesisRequest(BaseModel):
     """业务合成请求：前端只提交角色、情感和文本。"""
 
+    model_config = ConfigDict(extra="forbid")
+
     role_id: int
     emotion: str
     text: str
@@ -156,9 +158,18 @@ class RoleEmotionSynthesisRequest(BaseModel):
     ref_free: bool = False
     if_freeze: bool = False
     pause_second: float = 0.3
-    use_cuda_graph: bool = False
-    cuda_graph_mode: str = "graph"
+    inference_mode: str = "normal"
     return_base64: bool = True
+
+
+def _resolve_inference_acceleration(inference_mode: str = "normal") -> tuple[bool, str]:
+    """Resolve the public inference mode to internal CUDA Graph settings."""
+    normalized_mode = (inference_mode or "normal").strip().lower()
+    if normalized_mode in {"normal", "普通", "普通推理"}:
+        return False, "graph"
+    if normalized_mode in {"accelerated", "accelerate", "fast", "graph", "cuda_graph", "cuda-graph", "加速", "加速推理"}:
+        return True, "graph"
+    raise ValueError("推理模式仅支持 normal 或 accelerated")
 
 
 def _resources_root() -> Path:
@@ -965,6 +976,7 @@ async def stop_training(
 
 @app.post("/inference/tts")
 async def text_to_speech(
+    request: Request,
     text: str = Form(...),
     text_language: str = Form(default="zh"),
     ref_audio: UploadFile | None = File(default=None),
@@ -981,8 +993,7 @@ async def text_to_speech(
     ref_free: bool = Form(default=False),
     if_freeze: bool = Form(default=False),
     pause_second: float = Form(default=0.3),
-    use_cuda_graph: bool = Form(default=False),
-    cuda_graph_mode: str = Form(default="graph"),
+    inference_mode: str = Form(default="normal"),
     return_base64: bool = Form(default=True),
     user: Any = Depends(get_current_user),
 ):
@@ -992,6 +1003,11 @@ async def text_to_speech(
     try:
         import tempfile
         from Code.FastApi.Base.Inference.service import InferenceRequest, InferenceConfig
+
+        submitted_form = await request.form()
+        legacy_fields = {"use_cuda_graph", "cuda_graph_mode"} & set(submitted_form.keys())
+        if legacy_fields:
+            raise ValueError("use_cuda_graph/cuda_graph_mode 已废弃，请使用 inference_mode=normal 或 accelerated")
 
         temp_audio_path = ""
         created_temp = False
@@ -1007,6 +1023,9 @@ async def text_to_speech(
             raise ValueError("请上传参考音频或提供参考音频路径")
 
         try:
+            resolved_use_cuda_graph, resolved_cuda_graph_mode = _resolve_inference_acceleration(
+                inference_mode,
+            )
             request = InferenceRequest(
                 text=text,
                 text_language=text_language,
@@ -1024,8 +1043,8 @@ async def text_to_speech(
                     ref_free=ref_free,
                     if_freeze=if_freeze,
                     pause_second=pause_second,
-                    use_cuda_graph=use_cuda_graph,
-                    cuda_graph_mode=cuda_graph_mode,
+                    use_cuda_graph=resolved_use_cuda_graph,
+                    cuda_graph_mode=resolved_cuda_graph_mode,
                 ),
                 return_base64=return_base64,
             )
@@ -1033,6 +1052,8 @@ async def text_to_speech(
         finally:
             if created_temp and temp_audio_path and os.path.exists(temp_audio_path):
                 os.unlink(temp_audio_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"语音合成失败: {exc}")
 
@@ -1091,6 +1112,9 @@ async def synthesize_role_emotion(
         if not models_loaded and not service.load_models(role.gpt_model_path, role.sov_model_path):
             raise ValueError("模型加载失败")
 
+        resolved_use_cuda_graph, resolved_cuda_graph_mode = _resolve_inference_acceleration(
+            payload.inference_mode,
+        )
         request = InferenceRequest(
             text=payload.text.strip(),
             text_language=payload.text_language,
@@ -1108,8 +1132,8 @@ async def synthesize_role_emotion(
                 ref_free=payload.ref_free,
                 if_freeze=payload.if_freeze,
                 pause_second=payload.pause_second,
-                use_cuda_graph=payload.use_cuda_graph,
-                cuda_graph_mode=payload.cuda_graph_mode,
+                use_cuda_graph=resolved_use_cuda_graph,
+                cuda_graph_mode=resolved_cuda_graph_mode,
             ),
             return_base64=payload.return_base64,
         )

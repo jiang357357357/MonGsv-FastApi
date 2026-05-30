@@ -11,7 +11,7 @@ import tempfile
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -83,6 +83,7 @@ async def inference_endpoint(request: InferenceRequest):
 
 @app.post("/inference/file")
 async def inference_with_file_endpoint(
+    request: Request,
     text: str = Form(..., description="要合成的文本"),
     text_language: str = Form(default="zh", description="文本语言"),
     prompt_text: Optional[str] = Form(default=None, description="参考文本"),
@@ -96,8 +97,7 @@ async def inference_with_file_endpoint(
     temperature: float = Form(default=0.6, description="温度参数"),
     speed: float = Form(default=1.0, description="语速调节"),
     how_to_cut: str = Form(default="不切", description="文本切分方式"),
-    use_cuda_graph: bool = Form(default=False, description="尝试使用 CUDA Graph 加速普通推理"),
-    cuda_graph_mode: str = Form(default="graph", description="CUDA Graph模式: graph 或 decoder_only")
+    inference_mode: str = Form(default="normal", description="推理模式: normal 或 accelerated")
 ):
     """
     使用文件上传的语音合成推理
@@ -111,11 +111,27 @@ async def inference_with_file_endpoint(
     # 保存上传的音频文件
     temp_audio_path = None
     try:
+        submitted_form = await request.form()
+        legacy_fields = {"use_cuda_graph", "cuda_graph_mode"} & set(submitted_form.keys())
+        if legacy_fields:
+            raise HTTPException(
+                status_code=400,
+                detail="use_cuda_graph/cuda_graph_mode 已废弃，请使用 inference_mode=normal 或 accelerated",
+            )
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
             content = await ref_audio.read()
             temp_file.write(content)
             temp_audio_path = temp_file.name
         
+        normalized_mode = (inference_mode or "normal").strip().lower()
+        if normalized_mode in {"normal", "普通", "普通推理"}:
+            resolved_use_cuda_graph = False
+        elif normalized_mode in {"accelerated", "accelerate", "fast", "graph", "cuda_graph", "cuda-graph", "加速", "加速推理"}:
+            resolved_use_cuda_graph = True
+        elif normalized_mode:
+            raise HTTPException(status_code=400, detail="推理模式仅支持 normal 或 accelerated")
+
         # 构建推理请求
         config = InferenceConfig(
             top_k=top_k,
@@ -123,8 +139,8 @@ async def inference_with_file_endpoint(
             temperature=temperature,
             speed=speed,
             how_to_cut=how_to_cut,
-            use_cuda_graph=use_cuda_graph,
-            cuda_graph_mode=cuda_graph_mode,
+            use_cuda_graph=resolved_use_cuda_graph,
+            cuda_graph_mode="graph",
         )
         
         request = InferenceRequest(

@@ -49,7 +49,7 @@ class InferenceConfig(BaseModel):
     streaming_mode: bool = Field(default=False, description="是否流式推理")
     return_fragment: bool = Field(default=False, description="是否返回分段音频")
     use_cuda_graph: bool = Field(default=False, description="是否尝试使用 CUDA Graph 加速普通推理")
-    cuda_graph_mode: str = Field(default="graph", description="CUDA Graph模式: graph 或 decoder_only")
+    cuda_graph_mode: str = Field(default="graph", description="CUDA Graph模式")
 
 
 class InferenceRequest(BaseModel):
