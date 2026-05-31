@@ -1,4 +1,5 @@
 import json
+import math
 import os
 
 import numpy as np
@@ -6,10 +7,10 @@ from Code.FastApi.Base.ASR.services import voice_service
 
 PUNCTUATION_CHARS = set("，。！？；：、,.!?;:")
 VAD_CHUNK_MS = 200
-VAD_CHUNK_BYTES = 6400
 PREROLL_MS = 1200
-PREROLL_BYTES = int(16000 * 2 * PREROLL_MS / 1000)
 END_SILENCE_CHUNKS = 9
+SPEECH_NOISE_THRESHOLD = 0.6
+MIN_SPEECH_DURATION_MS = 250
 MIN_FINAL_BYTES = 3200
 LOW_VOLUME_LEVEL = 0.015
 CLIPPING_LEVEL = 0.98
@@ -39,6 +40,47 @@ class ASRFinalWebSocketHandler:
         self.silence_ms = 0
         self.noise_level = 0.0
         self.low_volume_chunks = 0
+        self.last_endpoint_silence_ms = 0
+        self._reset_vad_config()
+
+    def _reset_vad_config(self):
+        self.vad_chunk_ms = VAD_CHUNK_MS
+        self.vad_chunk_bytes = self._ms_to_pcm_bytes(self.vad_chunk_ms)
+        self.preroll_ms = PREROLL_MS
+        self.preroll_bytes = self._ms_to_pcm_bytes(self.preroll_ms)
+        self.end_silence_ms = VAD_CHUNK_MS * END_SILENCE_CHUNKS
+        self.end_silence_chunks = END_SILENCE_CHUNKS
+        self.speech_noise_threshold = SPEECH_NOISE_THRESHOLD
+        self.min_speech_duration_ms = MIN_SPEECH_DURATION_MS
+
+    def _apply_vad_config(self, data: dict):
+        vad = data.get("vad") if isinstance(data.get("vad"), dict) else {}
+        if "chunk_ms" in vad:
+            self.vad_chunk_ms = int(vad["chunk_ms"])
+        if "preroll_ms" in vad:
+            self.preroll_ms = int(vad["preroll_ms"])
+        if "speech_noise_threshold" in vad:
+            self.speech_noise_threshold = float(vad["speech_noise_threshold"])
+        if "min_speech_duration_ms" in vad:
+            self.min_speech_duration_ms = int(vad["min_speech_duration_ms"])
+
+        end_silence_ms = vad.get("end_silence_ms", data.get("end_silence_ms"))
+        if end_silence_ms is not None:
+            self.end_silence_ms = int(end_silence_ms)
+
+        self.vad_chunk_bytes = self._ms_to_pcm_bytes(self.vad_chunk_ms)
+        self.preroll_bytes = self._ms_to_pcm_bytes(self.preroll_ms)
+        self.end_silence_chunks = math.ceil(self.end_silence_ms / self.vad_chunk_ms)
+
+    def _vad_config_payload(self):
+        return {
+            "chunk_ms": self.vad_chunk_ms,
+            "end_silence_ms": self.end_silence_ms,
+            "end_silence_chunks": self.end_silence_chunks,
+            "speech_noise_threshold": self.speech_noise_threshold,
+            "min_speech_duration_ms": self.min_speech_duration_ms,
+            "preroll_ms": self.preroll_ms,
+        }
 
     def _reset_session_state(self):
         self.audio_buffer = bytearray()
@@ -56,6 +98,7 @@ class ASRFinalWebSocketHandler:
         self.silence_ms = 0
         self.noise_level = 0.0
         self.low_volume_chunks = 0
+        self.last_endpoint_silence_ms = 0
 
     async def handle_connect(self, websocket):
         self._reset_session_state()
@@ -85,26 +128,33 @@ class ASRFinalWebSocketHandler:
                 return
         self.raw_pcm.extend(bytes_data)
         self.audio_buffer.extend(bytes_data)
-        while len(self.audio_buffer) >= VAD_CHUNK_BYTES:
-            chunk = bytes(self.audio_buffer[:VAD_CHUNK_BYTES])
-            del self.audio_buffer[:VAD_CHUNK_BYTES]
+        while len(self.audio_buffer) >= self.vad_chunk_bytes:
+            chunk = bytes(self.audio_buffer[:self.vad_chunk_bytes])
+            del self.audio_buffer[:self.vad_chunk_bytes]
             await self._process_vad(websocket, chunk, is_final=False)
 
     async def handle_text(self, websocket, text_data):
         data = json.loads(text_data)
         cmd = data.get("command")
         if cmd == "start":
-            await self._on_start(websocket)
+            await self._on_start(websocket, data)
         elif cmd == "stop":
             await self._on_stop(websocket)
         elif cmd == "reset":
             self._reset_session_state()
             await websocket.send_json({"type": "status", "message": "已重置"})
 
-    async def _on_start(self, websocket):
+    async def _on_start(self, websocket, data: dict):
         print("[WS-ASR-FINAL] 开始录音")
         self._reset_session_state()
-        await websocket.send_json({"type": "status", "message": "开始录音"})
+        self._reset_vad_config()
+        self._apply_vad_config(data)
+        print(f"[WS-ASR-FINAL] VAD配置: {self._vad_config_payload()}")
+        await websocket.send_json({
+            "type": "status",
+            "message": "开始录音",
+            "vad": self._vad_config_payload(),
+        })
 
     async def _on_stop(self, websocket):
         raw_duration = len(self.raw_pcm) / 2 / self.sample_rate if self.raw_pcm else 0
@@ -148,9 +198,9 @@ class ASRFinalWebSocketHandler:
             audio_float,
             self.vad_cache,
             is_final=is_final,
-            chunk_size=VAD_CHUNK_MS,
-            speech_noise_thres=0.6,
-            min_speech_duration_ms=250,
+            chunk_size=self.vad_chunk_ms,
+            speech_noise_thres=self.speech_noise_threshold,
+            min_speech_duration_ms=self.min_speech_duration_ms,
         )
         is_speech = vad_result["is_speech"]
         segments = vad_result.get("segments", [])
@@ -158,10 +208,10 @@ class ASRFinalWebSocketHandler:
         self.vad_process_count += 1
         if is_speech:
             self.vad_hit_count += 1
-            self.speech_ms += VAD_CHUNK_MS
+            self.speech_ms += self.vad_chunk_ms
             self.silence_ms = 0
         else:
-            self.silence_ms += VAD_CHUNK_MS
+            self.silence_ms += self.vad_chunk_ms
             self.speech_ms = 0
             self._update_noise_level(audio_state["input_level"])
         if self.vad_process_count % 10 == 1 or is_speech or is_final:
@@ -197,7 +247,7 @@ class ASRFinalWebSocketHandler:
 
         self.speech_pcm.extend(audio_data)
         self.silence_count += 1
-        if self.silence_count >= END_SILENCE_CHUNKS or is_final:
+        if self.silence_count >= self.end_silence_chunks or is_final:
             await self._finalize_current_segment(websocket, source="silence-end")
 
     def _start_speech_segment(self):
@@ -215,6 +265,8 @@ class ASRFinalWebSocketHandler:
         pcm_data = bytes(self.speech_pcm)
         self.speech_pcm = bytearray()
         self.is_speaking = False
+        if source == "silence-end":
+            self.last_endpoint_silence_ms = self.silence_count * self.vad_chunk_ms
         self.silence_count = 0
         self.pre_speech_pcm = bytearray()
         self.vad_cache = {}
@@ -285,8 +337,8 @@ class ASRFinalWebSocketHandler:
 
     def _append_preroll(self, audio_data: bytes):
         self.pre_speech_pcm.extend(audio_data)
-        if len(self.pre_speech_pcm) > PREROLL_BYTES:
-            del self.pre_speech_pcm[:len(self.pre_speech_pcm) - PREROLL_BYTES]
+        if len(self.pre_speech_pcm) > self.preroll_bytes:
+            del self.pre_speech_pcm[:len(self.pre_speech_pcm) - self.preroll_bytes]
 
     def _get_audio_state(self, audio_float):
         if len(audio_float) == 0:
@@ -322,7 +374,14 @@ class ASRFinalWebSocketHandler:
             "reason": reason,
             "should_commit": should_commit,
             "final_text": self.accumulated_text,
+            "vad": {
+                "end_silence_ms": self.end_silence_ms,
+                "actual_silence_ms": self.last_endpoint_silence_ms if reason == "silence" else self.silence_ms,
+            },
         })
+
+    def _ms_to_pcm_bytes(self, ms: int) -> int:
+        return int(self.sample_rate * 2 * ms / 1000)
 
     @staticmethod
     def _commit_reason(source: str, text: str) -> str:
