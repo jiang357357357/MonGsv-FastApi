@@ -60,6 +60,55 @@ def _build_runtime_config() -> UnifiedGatewayConfig:
     )
 
 
+class LocalDialogRequest(BaseModel):
+    """本机文件选择对话框请求。"""
+    title: str = ""
+    initial_dir: str = ""
+    filetypes: list[tuple[str, str]] | None = None
+
+
+def _open_local_directory_dialog(title: str = "", initial_dir: str = "") -> str:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        path = filedialog.askdirectory(
+            title=title or "选择文件夹",
+            initialdir=initial_dir or None,
+            mustexist=True,
+            parent=root,
+        )
+        return str(Path(path).resolve()) if path else ""
+    finally:
+        root.destroy()
+
+
+def _open_local_file_dialog(
+    title: str = "",
+    initial_dir: str = "",
+    filetypes: list[tuple[str, str]] | None = None,
+) -> str:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        path = filedialog.askopenfilename(
+            title=title or "选择文件",
+            initialdir=initial_dir or None,
+            filetypes=filetypes or [("All files", "*.*")],
+            parent=root,
+        )
+        return str(Path(path).resolve()) if path else ""
+    finally:
+        root.destroy()
+
+
 def _save_uploaded_audio_files(input_audio_dir: str, audio_files: Optional[List[UploadFile]]) -> list[str]:
     """将训练请求中携带的音频文件保存到输入目录。"""
     if not audio_files:
@@ -551,6 +600,41 @@ async def health_check():
 async def get_monhub_status():
     """获取 MonHub 注册桥接状态。"""
     return monhub_bridge.status()
+
+
+@app.post("/system/dialog/select-directory")
+async def select_local_directory(
+    request: LocalDialogRequest = Body(default_factory=LocalDialogRequest),
+    user: Any = Depends(get_current_user),
+):
+    """在后端所在机器打开文件夹选择器，并返回真实路径。"""
+    try:
+        path = await asyncio.to_thread(
+            _open_local_directory_dialog,
+            request.title,
+            request.initial_dir,
+        )
+        return {"success": True, "path": path, "cancelled": not bool(path)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开文件夹选择器失败: {exc}")
+
+
+@app.post("/system/dialog/select-file")
+async def select_local_file(
+    request: LocalDialogRequest = Body(default_factory=LocalDialogRequest),
+    user: Any = Depends(get_current_user),
+):
+    """在后端所在机器打开文件选择器，并返回真实路径。"""
+    try:
+        path = await asyncio.to_thread(
+            _open_local_file_dialog,
+            request.title,
+            request.initial_dir,
+            request.filetypes,
+        )
+        return {"success": True, "path": path, "cancelled": not bool(path)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开文件选择器失败: {exc}")
 
 
 @app.post("/data-prep/audio-slice/process")
@@ -1372,6 +1456,87 @@ async def _run_preprocessing_workflow(
     }
 
 
+async def _run_formatting_only_workflow(
+    project_name: str,
+    sliced_audio_dir: str,
+    list_file: str,
+    output_dir: str,
+    version: str,
+    world_name: str = "Standalone",
+    experiment_name: str = "",
+) -> Dict[str, Any]:
+    """使用调用方提供的切分音频和标注文件，只执行训练集格式化。"""
+    workflow_steps = []
+    layout = _resource_layout(
+        project_name=project_name,
+        version=version,
+        world_name=world_name,
+        experiment_name=experiment_name,
+    )
+    project_root = layout["train_root"]
+    dataset_root = layout["dataset_root"]
+    model_sliced_dir = layout["model_sliced_dir"]
+    sliced_audio_dir = str(Path(sliced_audio_dir).expanduser())
+    list_file = str(Path(list_file).expanduser())
+    os.makedirs(dataset_root, exist_ok=True)
+    os.makedirs(model_sliced_dir, exist_ok=True)
+
+    if not Path(sliced_audio_dir).exists() or not Path(sliced_audio_dir).is_dir():
+        _stop_workflow(f"切分音频目录不存在: {sliced_audio_dir}")
+    if not Path(list_file).exists() or not Path(list_file).is_file():
+        _stop_workflow(f"标注文件不存在: {list_file}")
+    audio_suffixes = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
+    audio_files = [
+        path for path in Path(sliced_audio_dir).iterdir()
+        if path.is_file() and path.suffix.lower() in audio_suffixes
+    ]
+    if not audio_files:
+        _stop_workflow(f"切分音频目录没有可用音频文件: {sliced_audio_dir}")
+
+    copied_slice_files = _sync_directory_files(
+        Path(sliced_audio_dir),
+        Path(model_sliced_dir),
+    )
+    sync_result = {
+        "success": bool(copied_slice_files),
+        "message": f"已同步 {len(copied_slice_files)} 个切分音频到模型目录",
+        "output_dir": model_sliced_dir,
+        "output_files": copied_slice_files,
+    }
+    workflow_steps.append({"step": "model_slice_sync", "result": sync_result})
+
+    for task_name in ("text_processing", "audio_features", "semantic_encoding"):
+        service = _require_workflow_service(task_name)
+        result = await execute_format_task(
+            task_name=task_name,
+            service=service,
+            list_file=list_file,
+            input_wav_dir=sliced_audio_dir,
+            output_dir=dataset_root,
+            project_name=project_name,
+            version=version,
+        )
+        workflow_steps.append({"step": task_name, "result": _to_payload(result)})
+        _require_step_success(task_name, result)
+
+    return {
+        "project_name": project_name,
+        "project_root": project_root,
+        "dataset_root": dataset_root,
+        "model_root": layout["model_root"],
+        "model_sliced_dir": model_sliced_dir,
+        "gpt_model_dir": layout["gpt_model_dir"],
+        "sovits_model_dir": layout["sovits_model_dir"],
+        "world_name": layout["world_name"],
+        "base_version": layout["base_version"],
+        "experiment_name": layout["experiment_name"],
+        "slice_output": sliced_audio_dir,
+        "asr_output_dir": "",
+        "list_file": list_file,
+        "steps": workflow_steps,
+    }
+
+
 async def _start_training_workflow(
     project_name: str,
     project_root: str,
@@ -1535,6 +1700,8 @@ async def full_training_workflow(
     version: str = Form(default="v2Pro"),
     world_name: str = Form(default="Standalone"),
     experiment_name: str = Form(default=""),
+    preprocessing_mode: str = Form(default="full"),
+    list_file: str = Form(default=""),
     train_gpt: bool = Form(default=True),
     train_sovits: bool = Form(default=True),
     gpt_batch_size: int = Form(default=8),
@@ -1547,7 +1714,9 @@ async def full_training_workflow(
 ):
     """训练引导工作流: 预处理 -> 特征 -> 训练。"""
     try:
-        saved_audio_files = _save_uploaded_audio_files(input_audio_dir, audio_files)
+        saved_audio_files = []
+        if preprocessing_mode != "existing":
+            saved_audio_files = _save_uploaded_audio_files(input_audio_dir, audio_files)
         training_options = TrainingWorkflowOptions(
             start_training=True,
             train_gpt=train_gpt,
@@ -1559,15 +1728,28 @@ async def full_training_workflow(
             training_order=training_order,
         )
 
-        preprocess_result = await _run_preprocessing_workflow(
-            project_name=project_name,
-            input_audio_dir=input_audio_dir,
-            output_dir=output_dir,
-            language=language,
-            version=version,
-            world_name=world_name,
-            experiment_name=experiment_name,
-        )
+        if preprocessing_mode == "existing":
+            preprocess_result = await _run_formatting_only_workflow(
+                project_name=project_name,
+                sliced_audio_dir=input_audio_dir,
+                list_file=list_file,
+                output_dir=output_dir,
+                version=version,
+                world_name=world_name,
+                experiment_name=experiment_name,
+            )
+        elif preprocessing_mode == "full":
+            preprocess_result = await _run_preprocessing_workflow(
+                project_name=project_name,
+                input_audio_dir=input_audio_dir,
+                output_dir=output_dir,
+                language=language,
+                version=version,
+                world_name=world_name,
+                experiment_name=experiment_name,
+            )
+        else:
+            _stop_workflow(f"未知预处理模式: {preprocessing_mode}")
         training_steps = await _start_training_workflow(
             project_name=project_name,
             project_root=preprocess_result["project_root"],
@@ -1582,6 +1764,7 @@ async def full_training_workflow(
             "success": True,
             "message": "训练引导工作流执行完成",
             "workflow_type": "training_full",
+            "preprocessing_mode": preprocessing_mode,
             "project_name": project_name,
             "project_root": preprocess_result["project_root"],
             "received_audio_files": saved_audio_files,
