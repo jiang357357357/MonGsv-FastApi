@@ -38,7 +38,7 @@ class ASRConfig(BaseModel):
     
     @validator('language')
     def validate_language(cls, v):
-        allowed_languages = ['zh', 'en', 'ja', 'ko', 'auto']
+        allowed_languages = ['zh', 'yue', 'en', 'ja', 'ko', 'auto']
         if v not in allowed_languages:
             raise ValueError(f'language must be one of {allowed_languages}')
         return v

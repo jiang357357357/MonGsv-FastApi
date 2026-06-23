@@ -26,7 +26,7 @@ class TextProcessingConfig(BaseModel):
     
     @validator('language')
     def validate_language(cls, v):
-        allowed_languages = ['zh', 'en', 'ja', 'ko', 'multi']
+        allowed_languages = ['zh', 'yue', 'en', 'ja', 'ko', 'multi']
         if v not in allowed_languages:
             raise ValueError(f'language must be one of {allowed_languages}')
         return v

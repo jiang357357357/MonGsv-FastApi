@@ -162,10 +162,21 @@ class InferenceService:
         self._get_text_split_method = get_method
         self._detect_sovits_version = get_sovits_version_from_path_fast
 
+    def _runtime_tts_config_path(self) -> str:
+        """复制一份可写推理配置，避免官方管线写回仓库配置文件。"""
+        source_path = Path(self.gpt_sovits_root) / "GPT_SoVITS" / "configs" / "tts_infer.yaml"
+        runtime_dir = Path(self.gpt_sovits_root) / "Temp" / "Inference"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+
+        runtime_path = runtime_dir / f"tts_infer_{os.getpid()}.yaml"
+        if source_path.exists():
+            runtime_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+        return str(runtime_path)
+
     def _build_tts_config(self, gpt_path: str, sovits_path: str):
         """构建官方 TTS 配置对象。"""
         version, _, _ = self._detect_sovits_version(sovits_path)
-        config_path = os.path.join(self.gpt_sovits_root, "GPT_SoVITS", "configs", "tts_infer.yaml")
+        config_path = self._runtime_tts_config_path()
         tts_config = self._TTS_Config(config_path)
         tts_config.device = str(self.device)
         tts_config.is_half = self.is_half and str(self.device) != "cpu"

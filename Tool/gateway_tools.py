@@ -105,6 +105,8 @@ def _port_processes_windows(port: int) -> List[GatewayProcessInfo]:
 
     processes: List[GatewayProcessInfo] = []
     for pid in process_ids:
+        if not _windows_pid_exists(pid):
+            continue
         try:
             name = _process_name_windows(pid)
             processes.append(GatewayProcessInfo(pid=pid, name=name))
@@ -180,6 +182,24 @@ def _process_name_windows(pid: int) -> str:
 
     name = result.stdout.strip()
     return name or "unknown"
+
+
+def _windows_pid_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+
+    result = subprocess.run(
+        ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+        capture_output=True,
+        **SUBPROCESS_TEXT_KWARGS,
+        check=False,
+        timeout=10,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+
+    first_line = result.stdout.splitlines()[0].strip()
+    return bool(first_line and not first_line.startswith("INFO:"))
 
 
 def _port_processes(port: int) -> List[GatewayProcessInfo]:
