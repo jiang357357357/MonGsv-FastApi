@@ -22,6 +22,7 @@ import soundfile as sf
 import torch
 from pydantic import BaseModel, Field
 from Code.FastApi.Base.gpt_sovits_env import setup_gpt_sovits_paths
+from Code.runtime_env import ensure_gpt_sovits_english_runtime
 from .residency import ModelResidencyManager, ResidencyConfig
 
 
@@ -351,6 +352,27 @@ class InferenceService:
 
         return [item.strip() for item in str(split_text).splitlines() if item.strip()]
 
+    def _request_uses_english_text(self, request: InferenceRequest) -> bool:
+        languages = {
+            (request.text_language or "").strip().lower(),
+            (request.prompt_language or "").strip().lower(),
+        }
+        if languages & {"en", "eng", "english", "all_en"}:
+            return True
+        if languages & {"auto", "mix"}:
+            return any("a" <= char.lower() <= "z" for char in f"{request.text}\n{request.prompt_text or ''}")
+        return False
+
+    def _ensure_text_runtime_for_request(self, request: InferenceRequest) -> None:
+        if not self._request_uses_english_text(request):
+            return
+        ensure_gpt_sovits_english_runtime(
+            root=Path(self.gpt_sovits_root),
+            strict=True,
+            auto_download_nltk=True,
+            verbose=True,
+        )
+
     def _build_tts_inputs(self, request: InferenceRequest, ref_audio_path: str) -> Dict[str, Any]:
         """将服务请求映射为官方 TTS 输入。"""
         prompt_text = request.prompt_text or ""
@@ -423,6 +445,7 @@ class InferenceService:
             self.residency_manager.begin_request(model_key)
             print(f"[inference-residency] 开始流式推理: model_key={model_key}")
             temp_audio_path, temp_created = self._process_audio_input(request)
+            self._ensure_text_runtime_for_request(request)
             stream_request = request.copy(deep=True)
             stream_request.config.streaming_mode = True
             stream_request.config.return_fragment = False
@@ -503,6 +526,7 @@ class InferenceService:
             self.residency_manager.begin_request(model_key)
             print(f"[inference-residency] 开始推理: model_key={model_key}")
             temp_audio_path, temp_created = self._process_audio_input(request)
+            self._ensure_text_runtime_for_request(request)
             text_segments = self._preprocess_text(request.text, request.config.how_to_cut)
             inputs = self._build_tts_inputs(request, temp_audio_path)
             sample_rate, audio_data = self._run_tts(inputs)
