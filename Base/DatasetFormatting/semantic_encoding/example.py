@@ -283,7 +283,8 @@ def example_output_validation():
         # 模拟部分输出文件
         # TSV格式
         tsv_file = os.path.join(output_dir, "6-name2semantic.tsv")
-        tsv_content = """sample_001	1 2 3 4 5 6 7 8 9 10
+        tsv_content = """item_name	semantic_audio
+sample_001	1 2 3 4 5 6 7 8 9 10
 sample_002	2 3 4 5 6 7 8 9 10 11
 sample_003	3 4 5 6 7 8 9 10 11 12"""
         

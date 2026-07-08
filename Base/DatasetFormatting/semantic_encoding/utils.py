@@ -349,6 +349,7 @@ class SemanticEncodingUtils:
             "complete": False,
             "missing_files": [],
             "extra_files": [],
+            "format_errors": [],
             "statistics": {}
         }
         
@@ -372,8 +373,17 @@ class SemanticEncodingUtils:
                 with open(output_file, "r", encoding="utf8") as f:
                     lines = f.read().strip().split("\n")
                 
+                expected_header = "item_name\tsemantic_audio"
+                if not lines or lines[0].strip() != expected_header:
+                    result["format_errors"].append(
+                        "TSV标题行应为'item_name\\tsemantic_audio'"
+                    )
+                    data_lines = lines
+                else:
+                    data_lines = lines[1:]
+
                 found_files = set()
-                for line in lines:
+                for line in data_lines:
                     if "\t" in line:
                         wav_name = line.split("\t")[0]
                         found_files.add(wav_name)
@@ -389,7 +399,7 @@ class SemanticEncodingUtils:
             
             result["missing_files"] = sorted(list(missing))
             result["extra_files"] = sorted(list(extra))
-            result["complete"] = len(missing) == 0
+            result["complete"] = len(missing) == 0 and not result["format_errors"]
             
             result["statistics"] = {
                 "expected_count": len(expected_files),

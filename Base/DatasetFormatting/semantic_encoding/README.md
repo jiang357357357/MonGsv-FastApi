@@ -143,6 +143,7 @@ curl "http://localhost:8005/suggest-config?input_text_file=train_list.txt&cnhube
 
 ### TSV格式 (6-name2semantic.tsv)
 ```
+item_name	semantic_audio
 audio1	1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 audio2	2 3 4 5 6 7 8 9 10 11 12 13 14 15 16
 audio3	3 4 5 6 7 8 9 10 11 12 13 14 15 16 17

@@ -246,7 +246,8 @@ def test_output_validation():
         
         # 创建TSV格式输出
         tsv_file = os.path.join(output_dir, "6-name2semantic.tsv")
-        tsv_content = """test1	1 2 3 4 5 6 7 8 9 10
+        tsv_content = """item_name	semantic_audio
+test1	1 2 3 4 5 6 7 8 9 10
 test2	2 3 4 5 6 7 8 9 10 11
 test3	3 4 5 6 7 8 9 10 11 12"""
         
@@ -273,6 +274,7 @@ test3	3 4 5 6 7 8 9 10 11 12"""
         print(f"TSV完整性检查: {tsv_completeness}")
         
         assert not tsv_completeness["complete"]  # 应该不完整
+        assert not tsv_completeness["format_errors"]
         assert "test4" in tsv_completeness["missing_files"]
         
         # 测试JSON完整性检查

@@ -491,13 +491,13 @@ class SemanticEncodingService:
             
             if request.config.output_format == "tsv":
                 # TSV格式
-                lines = []
+                lines = ["item_name\tsemantic_audio"]
                 for wav_name, semantic_str in all_results:
                     if semantic_str is not None:
                         lines.append(f"{wav_name}\t{semantic_str}")
                 
                 with open(output_file, "w", encoding="utf8") as f:
-                    f.write("\n".join(lines))
+                    f.write("\n".join(lines) + "\n")
                     
             elif request.config.output_format == "json":
                 # JSON格式
