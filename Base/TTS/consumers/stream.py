@@ -114,6 +114,17 @@ class TTSStreamWebSocketHandler:
         if not models_loaded and not self.inference_service.load_models(role.gpt_model_path, role.sov_model_path):
             raise ValueError("模型加载失败")
 
+        if hasattr(self.inference_service, "_log_event"):
+            self.inference_service._log_event(
+                "stream_role_context",
+                request_id,
+                role_id=role.id,
+                role_name=role.name,
+                world_name=role.world_name,
+                version=role.version,
+                emotion=emotion,
+            )
+
         return TTSRequestContext(
             request_id=request_id,
             text_language=text_language,

@@ -8,11 +8,13 @@ import asyncio
 import base64
 import gc
 import io
+import json
 import os
 import sys
 import tempfile
 import time
 import traceback
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -57,6 +59,7 @@ class InferenceRequest(BaseModel):
     """推理请求。"""
 
     text: str = Field(description="要合成的文本")
+    request_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12], description="日志追踪 ID")
     text_language: str = Field(default="zh", description="文本语言")
     ref_audio_path: Optional[str] = Field(default=None, description="参考音频文件路径")
     ref_audio_base64: Optional[str] = Field(default=None, description="参考音频 Base64 编码")
@@ -113,6 +116,23 @@ class InferenceService:
         "all_yue",
         "all_ko",
     ]
+
+    @staticmethod
+    def _log_text(value: str | None) -> dict[str, Any]:
+        """生成适合单行 PM2 日志的文本字段。"""
+        text = value or ""
+        max_chars = max(100, int(os.environ.get("TTS_LOG_TEXT_MAX_CHARS", "2000")))
+        truncated = len(text) > max_chars
+        return {
+            "text": text[:max_chars],
+            "chars": len(text),
+            "truncated": truncated,
+        }
+
+    @staticmethod
+    def _log_event(event: str, request_id: str, **fields: Any) -> None:
+        payload = {"event": event, "request_id": request_id, **fields}
+        print(f"[TTS] {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}", flush=True)
 
     def __init__(self, gpt_sovits_root: str = None):
         self.gpt_sovits_root = gpt_sovits_root or self._find_gpt_sovits_root()
@@ -443,6 +463,13 @@ class InferenceService:
                 raise RuntimeError("模型未加载，请先加载 GPT 和 SoVITS 模型")
 
             self.residency_manager.begin_request(model_key)
+            self._log_event(
+                "stream_segment_start",
+                request.request_id,
+                language=request.text_language,
+                cut_method=request.config.how_to_cut,
+                content=self._log_text(request.text),
+            )
             print(f"[inference-residency] 开始流式推理: model_key={model_key}")
             temp_audio_path, temp_created = self._process_audio_input(request)
             self._ensure_text_runtime_for_request(request)
@@ -471,6 +498,14 @@ class InferenceService:
             self.residency_manager.end_request(model_key)
             if model_key:
                 rtf = elapsed / emitted_duration if emitted_duration > 0 else 0.0
+                self._log_event(
+                    "stream_segment_complete",
+                    request.request_id,
+                    audio_duration=round(emitted_duration, 3),
+                    elapsed=round(elapsed, 3),
+                    rtf=round(rtf, 3),
+                    sample_rate=last_sample_rate,
+                )
                 print(
                     "[推理耗时] | 项目 | 值 |\n"
                     "[推理耗时] | --- | ---: |\n"
@@ -528,11 +563,34 @@ class InferenceService:
             temp_audio_path, temp_created = self._process_audio_input(request)
             self._ensure_text_runtime_for_request(request)
             text_segments = self._preprocess_text(request.text, request.config.how_to_cut)
+            self._log_event(
+                "request",
+                request.request_id,
+                language=request.text_language,
+                prompt_language=request.prompt_language,
+                cut_method=request.config.how_to_cut,
+                inference_mode=request.config.cuda_graph_mode if request.config.use_cuda_graph else "normal",
+                content=self._log_text(request.text),
+                prompt=self._log_text(request.prompt_text),
+            )
+            self._log_event(
+                "segments",
+                request.request_id,
+                count=len(text_segments),
+                items=[{"seq": index, **self._log_text(segment)} for index, segment in enumerate(text_segments, 1)],
+            )
             inputs = self._build_tts_inputs(request, temp_audio_path)
             sample_rate, audio_data = self._run_tts(inputs)
 
             processing_time = (datetime.now() - start_time).total_seconds()
             audio_duration = len(audio_data) / sample_rate if sample_rate else 0.0
+            self._log_event(
+                "complete",
+                request.request_id,
+                audio_duration=round(audio_duration, 3),
+                processing_time=round(processing_time, 3),
+                sample_rate=sample_rate,
+            )
             response = InferenceResponse(
                 success=True,
                 message="推理完成",
@@ -550,6 +608,7 @@ class InferenceService:
 
             return response
         except Exception as exc:
+            self._log_event("error", request.request_id, error=str(exc))
             return InferenceResponse(
                 success=False,
                 message=f"推理失败: {exc}",

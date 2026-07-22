@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -77,6 +78,20 @@ class TTSStreamSession:
     async def _enqueue_segments(self, segments: list[str]):
         for segment in segments:
             self.seq += 1
+            print(
+                "[TTS] " + json.dumps(
+                    {
+                        "event": "stream_cut",
+                        "request_id": self.context.request_id,
+                        "seq": self.seq,
+                        "text": segment,
+                        "chars": len(segment),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
             await self.segment_queue.put((self.seq, segment))
 
     def _schedule_timeout_flush(self):
@@ -123,6 +138,7 @@ class TTSStreamSession:
             try:
                 request = InferenceRequest(
                     text=text,
+                    request_id=f"{self.context.request_id}:{seq}",
                     text_language=self.context.text_language,
                     ref_audio_path=self.context.ref_audio_path,
                     prompt_text=self.context.prompt_text,
@@ -173,4 +189,20 @@ class TTSStreamSession:
             "sample_rate": sample_rate,
             "bytes": total_bytes,
         })
-        print(f"[WS-TTS] seq={seq} text={text!r} bytes={total_bytes} sr={sample_rate}")
+        duration = total_bytes / 2 / sample_rate if sample_rate else 0.0
+        print(
+            "[TTS] " + json.dumps(
+                {
+                    "event": "stream_audio_complete",
+                    "request_id": self.context.request_id,
+                    "seq": seq,
+                    "text": text,
+                    "bytes": total_bytes,
+                    "sample_rate": sample_rate,
+                    "audio_duration": round(duration, 3),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )

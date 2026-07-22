@@ -1221,6 +1221,16 @@ async def synthesize_role_emotion(
             ),
             return_base64=payload.return_base64,
         )
+        if hasattr(service, "_log_event"):
+            service._log_event(
+                "role_context",
+                request.request_id,
+                role_id=role.id,
+                role_name=role.name,
+                world_name=role.world_name,
+                version=role.version,
+                emotion=payload.emotion.strip(),
+            )
         return await service.inference(request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
