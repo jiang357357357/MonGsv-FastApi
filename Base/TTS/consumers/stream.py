@@ -132,7 +132,7 @@ class TTSStreamWebSocketHandler:
             prompt_text=prompt_text,
             prompt_language=prompt_language,
             config=InferenceConfig(
-                how_to_cut=str(message.get("how_to_cut") or "不切"),
+                how_to_cut=str(message.get("how_to_cut") or "按标点符号切"),
                 top_k=int(message.get("top_k") or 20),
                 top_p=float(message.get("top_p") or 0.6),
                 temperature=float(message.get("temperature") or 0.6),

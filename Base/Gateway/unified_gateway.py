@@ -197,7 +197,7 @@ class RoleEmotionSynthesisRequest(BaseModel):
     text_language: str = "zh"
     world_id: Optional[int] = None
     version: Optional[str] = None
-    how_to_cut: str = "凑四句一切"
+    how_to_cut: str = "按标点符号切"
     top_k: int = 20
     top_p: float = 0.6
     temperature: float = 0.6
@@ -1067,7 +1067,7 @@ async def text_to_speech(
     ref_audio_path: str = Form(default=""),
     prompt_text: str = Form(default=""),
     prompt_language: str = Form(default="zh"),
-    how_to_cut: str = Form(default="凑四句一切"),
+    how_to_cut: str = Form(default="按标点符号切"),
     top_k: int = Form(default=20),
     top_p: float = Form(default=0.6),
     temperature: float = Form(default=0.6),
