@@ -9,12 +9,10 @@ GPT-SoVITS 统一网关服务
 import os
 import sys
 import asyncio
-import importlib.util
 import math
 import mimetypes
 import shutil
 import tempfile
-import traceback
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -22,49 +20,28 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Bod
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, ConfigDict
-
 from Code.FastApi.Base.Hub.monhub_bridge import create_monhub_bridge_from_env
 from Code.FastApi.Base.monconfig import MonConfig
+from Code.FastApi.Base.Gateway.config import build_runtime_config
+from Code.FastApi.Base.Gateway.resources import (
+    resource_layout as _resource_layout,
+    resources_root as _resources_root,
+    sync_directory_files as _sync_directory_files,
+)
+from Code.FastApi.Base.Gateway.schemas import (
+    BatchProjectsRequest,
+    LocalDialogRequest,
+    RoleEmotionSynthesisRequest,
+    TrainingLaunchSummary,
+    TrainingWorkflowOptions,
+)
+from Code.FastApi.Base.Gateway.service_manager import ServiceManager
 from Code.FastApi.Domain.Role.Services import RoleService
 from Code.FastApi.Domain.Routers import build_domain_router
 
 gateway_dir = Path(__file__).resolve().parent
 base_dir = gateway_dir.parent
 sys.path.insert(0, str(base_dir))
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"true", "yes", "1", "on", "enabled"}
-
-
-class UnifiedGatewayConfig(BaseModel):
-    """统一网关配置。"""
-    enable_auth: bool = False
-    api_key: Optional[str] = None
-    max_concurrent_jobs: int = 10
-    temp_dir: str = "temp"
-    log_level: str = "INFO"
-
-
-def _build_runtime_config() -> UnifiedGatewayConfig:
-    return UnifiedGatewayConfig(
-        enable_auth=_env_bool("ENABLE_AUTH", False),
-        api_key=os.environ.get("API_KEY"),
-        max_concurrent_jobs=int(os.environ.get("MAX_CONCURRENT_JOBS", "10")),
-        temp_dir=os.environ.get("TEMP_DIR", "temp"),
-        log_level=os.environ.get("LOG_LEVEL", "INFO"),
-    )
-
-
-class LocalDialogRequest(BaseModel):
-    """本机文件选择对话框请求。"""
-    title: str = ""
-    initial_dir: str = ""
-    filetypes: list[tuple[str, str]] | None = None
 
 
 def _open_local_directory_dialog(title: str = "", initial_dir: str = "") -> str:
@@ -151,66 +128,6 @@ def _build_asr_config_for_language(language: str):
     )
 
 
-class BatchProjectItem(BaseModel):
-    """批量项目定义。"""
-    name: str
-    input_dir: str
-    output_dir: str
-    language: str = "zh"
-    version: str = "v2Pro"
-
-
-class BatchProjectsRequest(BaseModel):
-    """批量处理请求。"""
-    projects: List[BatchProjectItem]
-
-
-class TrainingLaunchSummary(BaseModel):
-    training_type: str
-    success: bool
-    message: str
-    job_id: Optional[str] = None
-    config_file: Optional[str] = None
-    log_dir: Optional[str] = None
-    model_dir: Optional[str] = None
-
-
-class TrainingWorkflowOptions(BaseModel):
-    start_training: bool = False
-    train_gpt: bool = True
-    train_sovits: bool = True
-    gpt_batch_size: int = 8
-    gpt_total_epoch: int = 15
-    sovits_batch_size: int = 32
-    sovits_total_epoch: int = 8
-    training_order: str = "sovits_first"
-
-
-class RoleEmotionSynthesisRequest(BaseModel):
-    """业务合成请求：前端只提交角色、情感和文本。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    role_id: int
-    emotion: str
-    text: str
-    text_language: str = "zh"
-    world_id: Optional[int] = None
-    version: Optional[str] = None
-    how_to_cut: str = "按标点符号切"
-    top_k: int = 20
-    top_p: float = 0.6
-    temperature: float = 0.6
-    speed: float = 1.0
-    sample_steps: int = 8
-    if_sr: bool = False
-    ref_free: bool = False
-    if_freeze: bool = False
-    pause_second: float = 0.3
-    inference_mode: str = "normal"
-    return_base64: bool = True
-
-
 def _resolve_inference_acceleration(inference_mode: str = "normal") -> tuple[bool, str]:
     """Resolve the public inference mode to internal CUDA Graph settings."""
     normalized_mode = (inference_mode or "normal").strip().lower()
@@ -219,180 +136,6 @@ def _resolve_inference_acceleration(inference_mode: str = "normal") -> tuple[boo
     if normalized_mode in {"accelerated", "accelerate", "fast", "graph", "cuda_graph", "cuda-graph", "加速", "加速推理"}:
         return True, "graph"
     raise ValueError("推理模式仅支持 normal 或 accelerated")
-
-
-def _resources_root() -> Path:
-    config = MonConfig(start_path=Path(__file__).resolve())
-    workspace_root = config.workspace_root() or Path.cwd()
-    root = (workspace_root / "Resources").resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _normalize_path_segment(value: str) -> str:
-    normalized = (value or "").strip()
-    if not normalized:
-        raise ValueError("路径段不能为空")
-    invalid = set('\\/:*?"<>|')
-    if any(ch in invalid for ch in normalized) or normalized in {".", ".."}:
-        raise ValueError(f"路径段包含非法字符: {value}")
-    return normalized
-
-
-def _sync_directory_files(source_dir: Path, target_dir: Path) -> list[str]:
-    if not source_dir.exists() or not source_dir.is_dir():
-        return []
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    for child in target_dir.iterdir():
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-
-    copied_files: list[str] = []
-    for source_path in sorted(source_dir.iterdir(), key=lambda item: item.name.lower()):
-        if not source_path.is_file():
-            continue
-        target_path = target_dir / source_path.name
-        shutil.copy2(source_path, target_path)
-        copied_files.append(str(target_path))
-    return copied_files
-
-
-def _resource_layout(
-    project_name: str,
-    version: str,
-    world_name: str = "Standalone",
-    experiment_name: str = "",
-) -> Dict[str, str]:
-    role_name = _normalize_path_segment(project_name)
-    world = _normalize_path_segment(world_name or "Standalone")
-    base_version = _normalize_path_segment(version or "v2Pro")
-
-    resources_root = _resources_root()
-    model_root = resources_root / "Model" / world / role_name / base_version
-    train_root = resources_root / "Train" / "Projects" / world / role_name / base_version
-    dataset_root = train_root / "dataset"
-
-    return {
-        "role_name": role_name,
-        "world_name": world,
-        "base_version": base_version,
-        "experiment_name": "",
-        "model_root": str(model_root),
-        "train_root": str(train_root),
-        "train_root_parent": str(train_root.parent),
-        "dataset_root": str(dataset_root),
-        "model_sliced_dir": str(model_root / "sliced"),
-        "gpt_model_dir": str(model_root / "GPT"),
-        "sovits_model_dir": str(model_root / "SoVITS"),
-    }
-
-
-class ServiceManager:
-    """动态加载基础封装服务。"""
-
-    def __init__(self):
-        self.services: Dict[str, Dict[str, Any]] = {}
-        self.service_configs: Dict[str, Dict[str, str]] = {}
-        self.load_errors: Dict[str, str] = {}
-        self.load_all_services()
-
-    def load_all_services(self):
-        service_configs = [
-            {
-                "name": "audio_slice",
-                "path": "DataPreparation/audio_slice/service.py",
-                "class": "AudioSliceService",
-                "prefix": "/data-prep/audio-slice",
-            },
-            {
-                "name": "asr_recognition",
-                "path": "DataPreparation/asr_recognition/service.py",
-                "class": "ASRRecognitionService",
-                "prefix": "/data-prep/asr",
-            },
-            {
-                "name": "text_processing",
-                "path": "DatasetFormatting/text_processing/service.py",
-                "class": "TextProcessingService",
-                "prefix": "/dataset/text",
-            },
-            {
-                "name": "audio_features",
-                "path": "DatasetFormatting/audio_features/service.py",
-                "class": "AudioFeaturesService",
-                "prefix": "/dataset/audio",
-            },
-            {
-                "name": "semantic_encoding",
-                "path": "DatasetFormatting/semantic_encoding/service.py",
-                "class": "SemanticEncodingService",
-                "prefix": "/dataset/semantic",
-            },
-            {
-                "name": "gpt_training",
-                "path": "Training/gpt_training/service.py",
-                "class": "GPTTrainingService",
-                "prefix": "/training/gpt",
-            },
-            {
-                "name": "sovits_training",
-                "path": "Training/sovits_training/service.py",
-                "class": "SoVITSTrainingService",
-                "prefix": "/training/sovits",
-            },
-            {
-                "name": "inference",
-                "path": "Inference/service.py",
-                "class": "InferenceService",
-                "prefix": "/inference",
-            },
-        ]
-
-        for config in service_configs:
-            self.service_configs[config["name"]] = config
-            try:
-                self.load_service(config)
-                self.load_errors.pop(config["name"], None)
-                print(f"成功加载服务: {config['name']}")
-            except Exception as exc:
-                self.load_errors[config["name"]] = "".join(
-                    traceback.format_exception_only(type(exc), exc)
-                ).strip()
-                print(f"加载服务失败 {config['name']}: {exc}")
-
-    def load_service(self, config: Dict[str, str]):
-        module_path = base_dir / config["path"]
-        if not module_path.exists():
-            raise FileNotFoundError(f"模块文件不存在: {module_path}")
-
-        relative_module = config["path"][:-3].replace("/", ".").replace("\\", ".")
-        module_name = f"Code.FastApi.Base.{relative_module}"
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
-        module = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-
-        service_class = getattr(module, config["class"])
-        instance = service_class()
-
-        self.services[config["name"]] = {
-            "instance": instance,
-            "prefix": config["prefix"],
-            "module": module,
-        }
-        self.load_errors.pop(config["name"], None)
-
-    def get_service(self, name: str):
-        return self.services.get(name, {}).get("instance")
-
-    def reload_service(self, name: str):
-        config = self.service_configs.get(name)
-        if not config:
-            raise KeyError(f"服务不存在: {name}")
-        self.load_service(config)
 
 
 app = FastAPI(
@@ -414,7 +157,7 @@ app.add_middleware(
 app.include_router(build_domain_router())
 
 service_manager = ServiceManager()
-config = _build_runtime_config()
+config = build_runtime_config()
 security = HTTPBearer(auto_error=False)
 monhub_bridge = create_monhub_bridge_from_env()
 
