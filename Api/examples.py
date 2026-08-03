@@ -238,9 +238,9 @@ async def example_inference():
         try:
             # 创建推理配置
             config = InferenceConfig(
-                top_k=20,
-                top_p=0.6,
-                temperature=0.6,
+                top_k=15,
+                top_p=1.0,
+                temperature=1.0,
                 how_to_cut="不切",
                 speed=1.0
             )

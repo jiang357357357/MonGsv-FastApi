@@ -92,9 +92,9 @@ async def inference_with_file_endpoint(
     output_format: str = Form(default="wav", description="输出格式"),
     return_base64: bool = Form(default=False, description="是否返回Base64编码"),
     # 推理配置参数
-    top_k: int = Form(default=20, description="Top-K采样参数"),
-    top_p: float = Form(default=0.6, description="Top-P采样参数"),
-    temperature: float = Form(default=0.6, description="温度参数"),
+    top_k: int = Form(default=15, description="Top-K采样参数"),
+    top_p: float = Form(default=1.0, description="Top-P采样参数"),
+    temperature: float = Form(default=1.0, description="温度参数"),
     speed: float = Form(default=1.0, description="语速调节"),
     how_to_cut: str = Form(default="不切", description="文本切分方式"),
     inference_mode: str = Form(default="normal", description="推理模式: normal 或 accelerated")

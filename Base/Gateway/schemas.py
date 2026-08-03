@@ -58,11 +58,11 @@ class RoleEmotionSynthesisRequest(BaseModel):
     world_id: Optional[int] = None
     version: Optional[str] = None
     how_to_cut: str = "按标点符号切"
-    top_k: int = 20
-    top_p: float = 0.6
-    temperature: float = 0.6
+    top_k: int = 15
+    top_p: float = 1.0
+    temperature: float = 1.0
     speed: float = 1.0
-    sample_steps: int = 8
+    sample_steps: int = 32
     if_sr: bool = False
     ref_free: bool = False
     if_freeze: bool = False

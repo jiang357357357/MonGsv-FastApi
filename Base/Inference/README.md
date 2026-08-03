@@ -61,9 +61,9 @@ async def basic_inference():
     
     # 配置推理参数
     config = InferenceConfig(
-        top_k=20,
-        top_p=0.6,
-        temperature=0.6,
+        top_k=15,
+        top_p=1.0,
+        temperature=1.0,
         how_to_cut="不切"
     )
     
@@ -139,9 +139,9 @@ asyncio.run(basic_inference())
   "prompt_text": "参考文本",
   "prompt_language": "zh",
   "config": {
-    "top_k": 20,
-    "top_p": 0.6,
-    "temperature": 0.6,
+    "top_k": 15,
+    "top_p": 1.0,
+    "temperature": 1.0,
     "how_to_cut": "不切",
     "speed": 1.0
   },
@@ -214,9 +214,9 @@ asyncio.run(basic_inference())
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `top_k` | int | 20 | Top-K采样参数 |
-| `top_p` | float | 0.6 | Top-P采样参数 |
-| `temperature` | float | 0.6 | 温度参数，控制随机性 |
+| `top_k` | int | 15 | Top-K采样参数 |
+| `top_p` | float | 1.0 | Top-P采样参数 |
+| `temperature` | float | 1.0 | 温度参数，控制随机性 |
 | `how_to_cut` | str | "不切" | 文本切分方式 |
 | `speed` | float | 1.0 | 语速调节 |
 | `pause_second` | float | 0.3 | 句间停顿时长 |

@@ -78,8 +78,8 @@ class SemanticEncodingConfig(BaseModel):
     device: str = Field(default="auto", description="计算设备")
     batch_size: int = Field(default=1, description="批处理大小")
     max_sec: int = Field(default=30, description="最大音频长度(秒)")
-    top_k: int = Field(default=20, description="Top-K采样")
-    top_p: float = Field(default=0.6, description="Top-P采样")
+    top_k: int = Field(default=15, description="Top-K采样")
+    top_p: float = Field(default=1.0, description="Top-P采样")
 
 
 class SemanticEncodingRequest(BaseRequest):

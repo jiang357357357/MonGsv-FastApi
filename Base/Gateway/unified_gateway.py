@@ -13,6 +13,7 @@ import math
 import mimetypes
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -160,6 +161,9 @@ service_manager = ServiceManager()
 config = build_runtime_config()
 security = HTTPBearer(auto_error=False)
 monhub_bridge = create_monhub_bridge_from_env()
+training_workflows: Dict[str, Dict[str, Any]] = {}
+training_workflow_tasks: Dict[str, asyncio.Task] = {}
+training_workflow_lock = asyncio.Lock()
 
 
 @app.on_event("startup")
@@ -801,6 +805,18 @@ async def stop_training(
     raise HTTPException(status_code=404, detail=f"训练任务不存在或无法停止: {job_id}")
 
 
+@app.get("/workflow/training/status/{workflow_id}")
+async def get_training_workflow_status(
+    workflow_id: str,
+    user: Any = Depends(get_current_user),
+):
+    """查询后台顺序训练工作流及其子任务状态。"""
+    workflow = training_workflows.get(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail=f"训练工作流不存在: {workflow_id}")
+    return workflow
+
+
 @app.post("/inference/tts")
 async def text_to_speech(
     request: Request,
@@ -811,11 +827,11 @@ async def text_to_speech(
     prompt_text: str = Form(default=""),
     prompt_language: str = Form(default="zh"),
     how_to_cut: str = Form(default="按标点符号切"),
-    top_k: int = Form(default=20),
-    top_p: float = Form(default=0.6),
-    temperature: float = Form(default=0.6),
+    top_k: int = Form(default=15),
+    top_p: float = Form(default=1.0),
+    temperature: float = Form(default=1.0),
     speed: float = Form(default=1.0),
-    sample_steps: int = Form(default=8),
+    sample_steps: int = Form(default=32),
     if_sr: bool = Form(default=False),
     ref_free: bool = Form(default=False),
     if_freeze: bool = Form(default=False),
@@ -1290,6 +1306,125 @@ async def _run_formatting_only_workflow(
     }
 
 
+async def _wait_for_training_job(service: Any, job_id: str) -> Dict[str, Any]:
+    """异步等待训练子进程结束，不阻塞 FastAPI 事件循环。"""
+    while True:
+        status = service.get_training_status(job_id)
+        if status is None:
+            raise RuntimeError(f"训练任务状态丢失: {job_id}")
+
+        payload = _to_payload(status)
+        state = str(payload.get("status", "")).lower()
+        if state in {"completed", "failed", "stopped"}:
+            return payload
+        await asyncio.sleep(2)
+
+
+async def _launch_training_target(
+    target: str,
+    project_name: str,
+    project_root: str,
+    version: str,
+    options: TrainingWorkflowOptions,
+    gpt_model_dir: str,
+    sovits_model_dir: str,
+) -> tuple[Any, Any]:
+    """启动单个训练阶段并返回服务实例与启动结果。"""
+    if target == "gpt":
+        service = _ensure_service("gpt_training")
+        from Code.FastApi.Base.Training.gpt_training.service import GPTTrainingRequest, GPTTrainingConfig
+
+        request = GPTTrainingRequest(
+            exp_name=project_name,
+            exp_root=str(Path(project_root).parent),
+            workspace_dir=project_root,
+            model_output_dir=gpt_model_dir,
+            config=GPTTrainingConfig(
+                version=version,
+                batch_size=options.gpt_batch_size,
+                total_epoch=options.gpt_total_epoch,
+                save_every_epoch=options.gpt_total_epoch,
+            ),
+        )
+        return service, await service.start_training(request)
+
+    service = _ensure_service("sovits_training")
+    from Code.FastApi.Base.Training.sovits_training.service import SoVITSTrainingRequest, SoVITSTrainingConfig
+
+    request = SoVITSTrainingRequest(
+        exp_name=project_name,
+        exp_root=str(Path(project_root).parent),
+        workspace_dir=project_root,
+        model_output_dir=sovits_model_dir,
+        config=SoVITSTrainingConfig(
+            version=version,
+            batch_size=options.sovits_batch_size,
+            total_epoch=options.sovits_total_epoch,
+            save_every_epoch=options.sovits_total_epoch,
+        ),
+    )
+    return service, await service.start_training(request)
+
+
+async def _run_ordered_training_workflow(
+    workflow_id: str,
+    project_name: str,
+    project_root: str,
+    version: str,
+    options: TrainingWorkflowOptions,
+    targets: List[str],
+    gpt_model_dir: str,
+    sovits_model_dir: str,
+) -> None:
+    """在后台严格串行执行 GPT 与 SoVITS 训练阶段。"""
+    workflow = training_workflows[workflow_id]
+    try:
+        async with training_workflow_lock:
+            workflow["status"] = "running"
+            for target in targets:
+                workflow["current_target"] = target
+                service, result = await _launch_training_target(
+                    target=target,
+                    project_name=project_name,
+                    project_root=project_root,
+                    version=version,
+                    options=options,
+                    gpt_model_dir=gpt_model_dir,
+                    sovits_model_dir=sovits_model_dir,
+                )
+                if not _step_result_success(result):
+                    raise RuntimeError(f"{target}训练未启动: {_step_result_message(result)}")
+
+                result_payload = _to_payload(result)
+                job_id = str(result_payload.get("job_id") or "")
+                if not job_id:
+                    raise RuntimeError(f"{target}训练启动后未返回任务 ID")
+
+                job_record = {
+                    "target": target,
+                    "job_id": job_id,
+                    "launch": result_payload,
+                    "status": "running",
+                }
+                workflow["jobs"].append(job_record)
+                final_status = await _wait_for_training_job(service, job_id)
+                job_record["status"] = final_status
+                if final_status.get("status") != "completed":
+                    raise RuntimeError(
+                        f"{target}训练未成功完成: {final_status.get('status', 'unknown')}"
+                    )
+
+            workflow["current_target"] = None
+            workflow["status"] = "completed"
+    except asyncio.CancelledError:
+        workflow["status"] = "cancelled"
+        raise
+    except Exception as exc:
+        workflow["status"] = "failed"
+        workflow["error"] = str(exc)
+        print(f"[workflow:{workflow_id}] 顺序训练失败: {exc}")
+
+
 async def _start_training_workflow(
     project_name: str,
     project_root: str,
@@ -1321,54 +1456,51 @@ async def _start_training_workflow(
         },
     })
 
-    for target in ordered_targets:
-        if target == "gpt" and options.train_gpt:
-            service = _ensure_service("gpt_training")
-            from Code.FastApi.Base.Training.gpt_training.service import GPTTrainingRequest, GPTTrainingConfig
+    targets = [
+        target
+        for target in ordered_targets
+        if (target == "gpt" and options.train_gpt) or (target == "sovits" and options.train_sovits)
+    ]
+    if not targets:
+        _stop_workflow("至少需要启用 GPT 或 SoVITS 训练")
 
-            request = GPTTrainingRequest(
-                exp_name=project_name,
-                exp_root=str(Path(project_root).parent),
-                workspace_dir=project_root,
-                model_output_dir=gpt_model_dir,
-                config=GPTTrainingConfig(
-                    version=version,
-                    batch_size=options.gpt_batch_size,
-                    total_epoch=options.gpt_total_epoch,
-                    save_every_epoch=options.gpt_total_epoch,
-                ),
-            )
-            result = await service.start_training(request)
-            if not _step_result_success(result):
-                _stop_workflow(f"GPT训练未启动: {_step_result_message(result)}")
-            launches.append({
-                "step": "gpt_training",
-                "result": _to_payload(result),
-            })
-
-        if target == "sovits" and options.train_sovits:
-            service = _ensure_service("sovits_training")
-            from Code.FastApi.Base.Training.sovits_training.service import SoVITSTrainingRequest, SoVITSTrainingConfig
-
-            request = SoVITSTrainingRequest(
-                exp_name=project_name,
-                exp_root=str(Path(project_root).parent),
-                workspace_dir=project_root,
-                model_output_dir=sovits_model_dir,
-                config=SoVITSTrainingConfig(
-                    version=version,
-                    batch_size=options.sovits_batch_size,
-                    total_epoch=options.sovits_total_epoch,
-                    save_every_epoch=options.sovits_total_epoch,
-                ),
-            )
-            result = await service.start_training(request)
-            if not _step_result_success(result):
-                _stop_workflow(f"SoVITS训练未启动: {_step_result_message(result)}")
-            launches.append({
-                "step": "sovits_training",
-                "result": _to_payload(result),
-            })
+    workflow_id = f"training_workflow_{uuid.uuid4().hex[:12]}"
+    training_workflows[workflow_id] = {
+        "workflow_id": workflow_id,
+        "project_name": project_name,
+        "project_root": project_root,
+        "version": version,
+        "order": targets,
+        "status": "queued",
+        "current_target": None,
+        "jobs": [],
+        "error": None,
+    }
+    task = asyncio.create_task(
+        _run_ordered_training_workflow(
+            workflow_id=workflow_id,
+            project_name=project_name,
+            project_root=project_root,
+            version=version,
+            options=options,
+            targets=targets,
+            gpt_model_dir=gpt_model_dir,
+            sovits_model_dir=sovits_model_dir,
+        ),
+        name=workflow_id,
+    )
+    training_workflow_tasks[workflow_id] = task
+    task.add_done_callback(lambda _: training_workflow_tasks.pop(workflow_id, None))
+    launches.append({
+        "step": "training_schedule",
+        "result": {
+            "success": True,
+            "message": "训练工作流已排队，将严格按顺序执行",
+            "workflow_id": workflow_id,
+            "status": "queued",
+            "order": targets,
+        },
+    })
 
     return launches
 
@@ -1436,7 +1568,7 @@ async def complete_workflow(
             "steps": workflow_steps,
             "training_started": start_training,
             "training_steps": training_steps,
-            "next_action": "查看训练状态" if start_training else "可以开始训练模型",
+            "next_action": "使用 /workflow/training/status/{workflow_id} 查看顺序训练状态" if start_training else "可以开始训练模型",
         }
     except WorkflowAbortError as exc:
         raise HTTPException(status_code=400, detail=f"工作流已停止: {exc}")
@@ -1524,7 +1656,7 @@ async def full_training_workflow(
             "preprocess_steps": preprocess_result["steps"],
             "training_steps": training_steps,
             "steps": [*preprocess_result["steps"], *training_steps],
-            "next_action": "使用 /training/status/{job_id} 查看训练状态",
+            "next_action": "使用 /workflow/training/status/{workflow_id} 查看顺序训练状态",
         }
     except WorkflowAbortError as exc:
         raise HTTPException(status_code=400, detail=f"训练引导工作流已停止: {exc}")

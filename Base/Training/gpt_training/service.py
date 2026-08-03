@@ -56,7 +56,10 @@ class GPTTrainingConfig(BaseModel):
     
     # 模型架构
     vocab_size: int = Field(default=1025, description="语义token词汇表大小")
-    phoneme_vocab_size: int = Field(default=732, description="音素词汇表大小")
+    phoneme_vocab_size: Optional[int] = Field(
+        default=None,
+        description="音素词汇表大小；未指定时沿用版本模板（V1=512，其余版本=732）",
+    )
     embedding_dim: int = Field(default=512, description="嵌入维度")
     hidden_dim: int = Field(default=512, description="隐藏维度")
     n_layer: int = Field(default=24, description="Transformer层数")
@@ -190,6 +193,7 @@ class GPTTrainingService:
         data["train"]["if_save_every_weights"] = config.if_save_every_weights
         data["train"]["if_dpo"] = config.if_dpo
         data["train"]["precision"] = config.precision
+        data["train"]["gradient_clip"] = config.gradient_clip
         data["train"]["exp_name"] = request.exp_name
         
         # 学习率配置
@@ -203,7 +207,8 @@ class GPTTrainingService:
         
         # 模型配置
         data["model"]["vocab_size"] = config.vocab_size
-        data["model"]["phoneme_vocab_size"] = config.phoneme_vocab_size
+        if config.phoneme_vocab_size is not None:
+            data["model"]["phoneme_vocab_size"] = config.phoneme_vocab_size
         data["model"]["embedding_dim"] = config.embedding_dim
         data["model"]["hidden_dim"] = config.hidden_dim
         data["model"]["n_layer"] = config.n_layer

@@ -31,12 +31,15 @@ from .residency import ModelResidencyManager, ResidencyConfig
 class InferenceConfig(BaseModel):
     """推理配置参数。"""
 
-    top_k: int = Field(default=20, description="Top-K 采样参数")
-    top_p: float = Field(default=0.6, description="Top-P 采样参数")
-    temperature: float = Field(default=0.6, description="温度参数")
+    top_k: int = Field(default=15, description="Top-K 采样参数")
+    top_p: float = Field(default=1.0, description="Top-P 采样参数")
+    temperature: float = Field(default=1.0, description="温度参数")
     how_to_cut: str = Field(default="按标点符号切", description="文本切分方式")
     speed: float = Field(default=1.0, description="语速调节")
-    pause_second: float = Field(default=0.3, description="句间停顿时长(秒)")
+    pause_second: Optional[float] = Field(
+        default=None,
+        description="句间停顿时长(秒)；提供时优先于 fragment_interval",
+    )
     ref_free: bool = Field(default=False, description="是否启用无参考模式")
     if_freeze: bool = Field(default=False, description="是否冻结缓存")
     if_sr: bool = Field(default=False, description="是否启用音频超分辨率")
@@ -46,7 +49,7 @@ class InferenceConfig(BaseModel):
     seed: int = Field(default=-1, description="随机种子，-1 为随机")
     parallel_infer: bool = Field(default=True, description="是否并行推理")
     repetition_penalty: float = Field(default=1.35, description="重复惩罚")
-    sample_steps: int = Field(default=8, description="采样步数")
+    sample_steps: int = Field(default=32, description="采样步数")
     batch_threshold: float = Field(default=0.75, description="分桶阈值")
     super_sampling: bool = Field(default=False, description="是否启用超分")
     streaming_mode: bool = Field(default=False, description="是否流式推理")
@@ -399,6 +402,11 @@ class InferenceService:
         prompt_lang = request.prompt_language
         if request.config.ref_free:
             prompt_text = ""
+        fragment_interval = (
+            request.config.pause_second
+            if request.config.pause_second is not None
+            else request.config.fragment_interval
+        )
 
         return {
             "text": request.text,
@@ -416,7 +424,7 @@ class InferenceService:
             "speed_factor": float(request.config.speed),
             "split_bucket": request.config.split_bucket,
             "return_fragment": request.config.return_fragment,
-            "fragment_interval": float(request.config.fragment_interval),
+            "fragment_interval": float(fragment_interval),
             "seed": int(request.config.seed),
             "parallel_infer": request.config.parallel_infer,
             "repetition_penalty": float(request.config.repetition_penalty),

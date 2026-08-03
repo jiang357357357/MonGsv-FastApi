@@ -68,8 +68,8 @@ class SemanticEncodingConfig(BaseModel):
     max_sec: int = Field(default=30, ge=5, le=60, description="最大音频长度(秒)")
     
     # 采样参数
-    top_k: int = Field(default=20, ge=1, le=100, description="Top-K采样")
-    top_p: float = Field(default=0.6, ge=0.1, le=1.0, description="Top-P采样")
+    top_k: int = Field(default=15, ge=1, le=100, description="Top-K采样")
+    top_p: float = Field(default=1.0, ge=0.1, le=1.0, description="Top-P采样")
     temperature: float = Field(default=1.0, ge=0.1, le=2.0, description="温度参数")
     
     # 编码选项

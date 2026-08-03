@@ -44,9 +44,9 @@ class ModelConfig(BaseModel):
     
     # 推理参数
     default_language: str = "zh"
-    default_top_k: int = 20
-    default_top_p: float = 0.6
-    default_temperature: float = 0.6
+    default_top_k: int = 15
+    default_top_p: float = 1.0
+    default_temperature: float = 1.0
 
 
 class ModelManager:

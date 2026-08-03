@@ -133,15 +133,19 @@ class TTSStreamWebSocketHandler:
             prompt_language=prompt_language,
             config=InferenceConfig(
                 how_to_cut=str(message.get("how_to_cut") or "按标点符号切"),
-                top_k=int(message.get("top_k") or 20),
-                top_p=float(message.get("top_p") or 0.6),
-                temperature=float(message.get("temperature") or 0.6),
+                top_k=int(message.get("top_k") or 15),
+                top_p=float(message.get("top_p") or 1.0),
+                temperature=float(message.get("temperature") or 1.0),
                 speed=float(message.get("speed") or 1.0),
-                sample_steps=int(message.get("sample_steps") or 8),
+                sample_steps=int(message.get("sample_steps") or 32),
                 if_sr=self._bool_value(message.get("if_sr"), False),
                 ref_free=self._bool_value(message.get("ref_free"), False),
                 if_freeze=self._bool_value(message.get("if_freeze"), False),
-                pause_second=float(message.get("pause_second") or 0.3),
+                pause_second=(
+                    float(message["pause_second"])
+                    if message.get("pause_second") is not None
+                    else 0.3
+                ),
                 streaming_mode=True,
                 parallel_infer=False,
                 split_bucket=False,

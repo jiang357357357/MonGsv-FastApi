@@ -226,7 +226,7 @@ class SoVITSTrainingService:
         data["train"]["c_kl"] = config.c_kl
         
         # 数据配置
-        data["data"]["segment_size"] = config.segment_size
+        data["train"]["segment_size"] = config.segment_size
         data["data"]["sampling_rate"] = config.sampling_rate
         
         # 模型和路径配置
