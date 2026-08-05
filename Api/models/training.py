@@ -22,7 +22,6 @@ class GPTTrainingConfig(BaseModel):
     save_every_epoch: int = Field(default=5, description="保存间隔")
     gpu_numbers: str = Field(default="0", description="GPU设备")
     warmup_steps: int = Field(default=1000, description="预热步数")
-    gradient_clip: float = Field(default=1.0, description="梯度裁剪")
     weight_decay: float = Field(default=0.01, description="权重衰减")
 
 

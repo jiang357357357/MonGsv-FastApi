@@ -135,7 +135,6 @@ def advanced_gpt_config_example():
         # 训练选项
         if_dpo=True,  # 启用DPO训练
         precision="16-mixed",
-        gradient_clip=0.8,
         
         # 数据配置
         max_sec=60,  # 增加最大音频长度

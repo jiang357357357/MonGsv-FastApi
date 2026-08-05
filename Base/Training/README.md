@@ -204,7 +204,6 @@ print("训练完成!")
     "pretrained_s1": "",          # 预训练模型路径
     "if_dpo": false,              # DPO训练选项
     "precision": "16-mixed",      # 训练精度
-    "gradient_clip": 1.0,         # 梯度裁剪
     "max_sec": 54,                # 最大音频长度
     "num_workers": 4              # 数据加载进程
 }
@@ -268,10 +267,11 @@ DistributedBucketSampler(
 )
 ```
 
-### 4. 梯度裁剪
+### 4. 优化器梯度控制
 ```python
-# 防止梯度爆炸
-grad_norm = clip_grad_value_(model.parameters(), 1.0)
+# GPT 使用官方 ScaledAdam 内置裁剪；不要向 Lightning Trainer
+# 传入 gradient_clip_val，因为 GPT 采用手动优化。
+ScaledAdam(..., clipping_scale=2.0)
 ```
 
 ### 5. 学习率调度
@@ -316,10 +316,7 @@ tensorboard --logdir logs/
 # 1. 降低学习率
 learning_rate = 0.00005  # 从0.0001降到0.00005
 
-# 2. 增强梯度裁剪
-gradient_clip = 0.5  # 从1.0降到0.5
-
-# 3. 检查数据
+# 2. 检查数据
 if torch.isnan(loss):
     print("NaN detected, skipping batch")
     continue

@@ -817,6 +817,36 @@ async def get_training_workflow_status(
     return workflow
 
 
+@app.post("/workflow/training/stop/{workflow_id}")
+async def stop_training_workflow(
+    workflow_id: str,
+    user: Any = Depends(get_current_user),
+):
+    """停止排队中或运行中的完整训练工作流。"""
+    workflow = training_workflows.get(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail=f"训练工作流不存在: {workflow_id}")
+
+    if workflow["status"] in {"completed", "failed", "stopped"}:
+        return workflow
+
+    task = training_workflow_tasks.get(workflow_id)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        if workflow["status"] not in {"completed", "failed", "stopped"}:
+            workflow["status"] = "stopped"
+            workflow["current_target"] = None
+    else:
+        workflow["status"] = "stopped"
+        workflow["current_target"] = None
+
+    return workflow
+
+
 @app.post("/inference/tts")
 async def text_to_speech(
     request: Request,
@@ -1320,6 +1350,31 @@ async def _wait_for_training_job(service: Any, job_id: str) -> Dict[str, Any]:
         await asyncio.sleep(2)
 
 
+def _workflow_target(workflow: Dict[str, Any], target: str) -> Dict[str, Any]:
+    """取得工作流中预先创建的目标记录。"""
+    for record in workflow["targets"]:
+        if record["target"] == target:
+            return record
+    raise RuntimeError(f"训练工作流缺少目标记录: {target}")
+
+
+async def _stop_active_workflow_target(workflow: Dict[str, Any]) -> None:
+    """取消工作流时同步终止当前训练子进程。"""
+    current_target = workflow.get("current_target")
+    if not current_target:
+        return
+
+    record = _workflow_target(workflow, current_target)
+    job_id = record.get("job_id")
+    if job_id:
+        service = service_manager.get_service(f"{current_target}_training")
+        if service and hasattr(service, "stop_training"):
+            await asyncio.to_thread(service.stop_training, job_id)
+
+    record["status"] = "stopped"
+    record["error"] = None
+
+
 async def _launch_training_target(
     target: str,
     project_name: str,
@@ -1383,6 +1438,8 @@ async def _run_ordered_training_workflow(
             workflow["status"] = "running"
             for target in targets:
                 workflow["current_target"] = target
+                target_record = _workflow_target(workflow, target)
+                target_record["status"] = "starting"
                 service, result = await _launch_training_target(
                     target=target,
                     project_name=project_name,
@@ -1393,33 +1450,44 @@ async def _run_ordered_training_workflow(
                     sovits_model_dir=sovits_model_dir,
                 )
                 if not _step_result_success(result):
-                    raise RuntimeError(f"{target}训练未启动: {_step_result_message(result)}")
+                    error = f"{target}训练未启动: {_step_result_message(result)}"
+                    target_record["status"] = "failed"
+                    target_record["error"] = error
+                    raise RuntimeError(error)
 
                 result_payload = _to_payload(result)
                 job_id = str(result_payload.get("job_id") or "")
                 if not job_id:
-                    raise RuntimeError(f"{target}训练启动后未返回任务 ID")
+                    error = f"{target}训练启动后未返回任务 ID"
+                    target_record["status"] = "failed"
+                    target_record["error"] = error
+                    raise RuntimeError(error)
 
-                job_record = {
-                    "target": target,
-                    "job_id": job_id,
-                    "launch": result_payload,
-                    "status": "running",
-                }
-                workflow["jobs"].append(job_record)
+                target_record["job_id"] = job_id
+                target_record["launch"] = result_payload
+                target_record["status"] = "running"
                 final_status = await _wait_for_training_job(service, job_id)
-                job_record["status"] = final_status
-                if final_status.get("status") != "completed":
-                    raise RuntimeError(
-                        f"{target}训练未成功完成: {final_status.get('status', 'unknown')}"
-                    )
+                state = str(final_status.get("status", "unknown")).lower()
+                target_record["status"] = state
+                target_record["details"] = final_status
+                target_record["error"] = final_status.get("error_message")
+                if state == "stopped":
+                    workflow["status"] = "stopped"
+                    workflow["current_target"] = None
+                    return
+                if state != "completed":
+                    error = final_status.get("error_message") or f"{target}训练未成功完成: {state}"
+                    target_record["error"] = error
+                    raise RuntimeError(error)
 
             workflow["current_target"] = None
             workflow["status"] = "completed"
     except asyncio.CancelledError:
-        workflow["status"] = "cancelled"
-        raise
+        await _stop_active_workflow_target(workflow)
+        workflow["current_target"] = None
+        workflow["status"] = "stopped"
     except Exception as exc:
+        workflow["current_target"] = None
         workflow["status"] = "failed"
         workflow["error"] = str(exc)
         print(f"[workflow:{workflow_id}] 顺序训练失败: {exc}")
@@ -1433,29 +1501,19 @@ async def _start_training_workflow(
     model_root: str = "",
     gpt_model_dir: str = "",
     sovits_model_dir: str = "",
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     ordered_targets: List[str]
     if options.training_order == "gpt_first":
         ordered_targets = ["gpt", "sovits"]
     else:
         ordered_targets = ["sovits", "gpt"]
 
-    launches: List[Dict[str, Any]] = []
     dataset_check = _validate_training_dataset(
         project_root=project_root,
         version=version,
         require_gpt=options.train_gpt,
         require_sovits=options.train_sovits,
     )
-    launches.append({
-        "step": "training_dataset_check",
-        "result": {
-            "success": True,
-            "message": "训练前置数据检查通过",
-            **dataset_check,
-        },
-    })
-
     targets = [
         target
         for target in ordered_targets
@@ -1473,7 +1531,18 @@ async def _start_training_workflow(
         "order": targets,
         "status": "queued",
         "current_target": None,
-        "jobs": [],
+        "targets": [
+            {
+                "target": target,
+                "status": "pending",
+                "job_id": None,
+                "launch": None,
+                "details": None,
+                "error": None,
+            }
+            for target in targets
+        ],
+        "dataset": dataset_check,
         "error": None,
     }
     task = asyncio.create_task(
@@ -1491,18 +1560,7 @@ async def _start_training_workflow(
     )
     training_workflow_tasks[workflow_id] = task
     task.add_done_callback(lambda _: training_workflow_tasks.pop(workflow_id, None))
-    launches.append({
-        "step": "training_schedule",
-        "result": {
-            "success": True,
-            "message": "训练工作流已排队，将严格按顺序执行",
-            "workflow_id": workflow_id,
-            "status": "queued",
-            "order": targets,
-        },
-    })
-
-    return launches
+    return training_workflows[workflow_id]
 
 
 @app.post("/workflow/complete")
@@ -1536,7 +1594,7 @@ async def complete_workflow(
             experiment_name=experiment_name,
         )
         workflow_steps = list(preprocess_result["steps"])
-        training_steps: List[Dict[str, Any]] = []
+        training_workflow: Optional[Dict[str, Any]] = None
 
         if start_training:
             training_options = TrainingWorkflowOptions(
@@ -1549,7 +1607,7 @@ async def complete_workflow(
                 sovits_total_epoch=sovits_total_epoch,
                 training_order=training_order,
             )
-            training_steps = await _start_training_workflow(
+            training_workflow = await _start_training_workflow(
                 project_name=project_name,
                 project_root=preprocess_result["project_root"],
                 version=version,
@@ -1558,17 +1616,20 @@ async def complete_workflow(
                 gpt_model_dir=preprocess_result["gpt_model_dir"],
                 sovits_model_dir=preprocess_result["sovits_model_dir"],
             )
-            workflow_steps.extend(training_steps)
 
         return {
             "success": True,
-            "message": "完整工作流执行完成" if not start_training else "完整工作流与训练引导执行完成",
+            "message": "完整工作流执行完成" if not start_training else "预处理完成，训练工作流已排队",
             "project_name": project_name,
             "project_root": preprocess_result["project_root"],
             "steps": workflow_steps,
             "training_started": start_training,
-            "training_steps": training_steps,
-            "next_action": "使用 /workflow/training/status/{workflow_id} 查看顺序训练状态" if start_training else "可以开始训练模型",
+            "training_workflow": training_workflow,
+            "next_action": (
+                f"使用 /workflow/training/status/{training_workflow['workflow_id']} 查看顺序训练状态"
+                if training_workflow
+                else "可以开始训练模型"
+            ),
         }
     except WorkflowAbortError as exc:
         raise HTTPException(status_code=400, detail=f"工作流已停止: {exc}")
@@ -1635,7 +1696,7 @@ async def full_training_workflow(
             )
         else:
             _stop_workflow(f"未知预处理模式: {preprocessing_mode}")
-        training_steps = await _start_training_workflow(
+        training_workflow = await _start_training_workflow(
             project_name=project_name,
             project_root=preprocess_result["project_root"],
             version=version,
@@ -1647,16 +1708,16 @@ async def full_training_workflow(
 
         return {
             "success": True,
-            "message": "训练引导工作流执行完成",
+            "message": "预处理完成，训练工作流已排队",
             "workflow_type": "training_full",
             "preprocessing_mode": preprocessing_mode,
             "project_name": project_name,
             "project_root": preprocess_result["project_root"],
             "received_audio_files": saved_audio_files,
             "preprocess_steps": preprocess_result["steps"],
-            "training_steps": training_steps,
-            "steps": [*preprocess_result["steps"], *training_steps],
-            "next_action": "使用 /workflow/training/status/{workflow_id} 查看顺序训练状态",
+            "training_workflow": training_workflow,
+            "steps": preprocess_result["steps"],
+            "next_action": f"使用 /workflow/training/status/{training_workflow['workflow_id']} 查看顺序训练状态",
         }
     except WorkflowAbortError as exc:
         raise HTTPException(status_code=400, detail=f"训练引导工作流已停止: {exc}")

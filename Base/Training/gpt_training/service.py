@@ -13,6 +13,7 @@ import asyncio
 import tempfile
 import shutil
 import threading
+from collections import deque
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
 from subprocess import Popen, PIPE, STDOUT
@@ -48,7 +49,6 @@ class GPTTrainingConfig(BaseModel):
     # 高级选项
     if_dpo: bool = Field(default=False, description="是否开启DPO训练选项(实验性)")
     precision: str = Field(default="16-mixed", description="训练精度: 16-mixed, 32")
-    gradient_clip: float = Field(default=1.0, description="梯度裁剪阈值")
     
     # 数据相关
     max_sec: int = Field(default=54, description="最大音频长度(秒)")
@@ -193,7 +193,6 @@ class GPTTrainingService:
         data["train"]["if_save_every_weights"] = config.if_save_every_weights
         data["train"]["if_dpo"] = config.if_dpo
         data["train"]["precision"] = config.precision
-        data["train"]["gradient_clip"] = config.gradient_clip
         data["train"]["exp_name"] = request.exp_name
         
         # 学习率配置
@@ -237,7 +236,13 @@ class GPTTrainingService:
         """以行缓冲方式打开日志文件。"""
         return open(log_file, "a", encoding="utf-8", buffering=1)
 
-    def _start_output_forwarder(self, process: Popen, log_handle, job_id: str) -> Optional[threading.Thread]:
+    def _start_output_forwarder(
+        self,
+        process: Popen,
+        log_handle,
+        job_id: str,
+        output_tail: deque[str],
+    ) -> Optional[threading.Thread]:
         """将训练输出同时写入日志文件并实时打印到控制台。"""
         if process.stdout is None:
             return None
@@ -247,6 +252,7 @@ class GPTTrainingService:
                 for line in process.stdout:
                     if not line:
                         continue
+                    output_tail.append(line.rstrip())
                     log_handle.write(line)
                     log_handle.flush()
                     print(f"[{job_id}] {line.rstrip()}")
@@ -257,10 +263,31 @@ class GPTTrainingService:
                     process.stdout.close()
                 except Exception:
                     pass
+                if not log_handle.closed:
+                    log_handle.close()
 
         thread = threading.Thread(target=_forward, name=f"{job_id}_log_forwarder", daemon=True)
         thread.start()
         return thread
+
+    @staticmethod
+    def _finish_log_forwarding(job_info: Dict[str, Any]) -> None:
+        """等待剩余输出写入后关闭日志，避免状态轮询与转发线程竞争。"""
+        output_thread = job_info.get("output_thread")
+        if output_thread and output_thread.is_alive():
+            output_thread.join(timeout=2)
+        log_handle = job_info.get("log_handle")
+        if log_handle and not log_handle.closed and (not output_thread or not output_thread.is_alive()):
+            log_handle.close()
+
+    @staticmethod
+    def _get_process_error(job_info: Dict[str, Any], return_code: int) -> str:
+        """从训练输出末尾提取最接近根因的一行。"""
+        for line in reversed(job_info.get("output_tail", ())):
+            message = str(line).strip()
+            if message:
+                return message
+        return f"GPT训练进程异常退出，退出码: {return_code}"
     
     def _prepare_training_environment(self, request: GPTTrainingRequest) -> tuple:
         """准备训练环境"""
@@ -376,6 +403,7 @@ class GPTTrainingService:
             # 创建日志文件
             log_file = os.path.join(s1_dir, "train", "logs", f"training_{job_id}.log")
             log_handle = self._open_log_file(log_file)
+            output_tail: deque[str] = deque(maxlen=80)
             
             # 启动训练进程
             print(f"启动GPT训练: {' '.join(cmd)}")
@@ -390,7 +418,7 @@ class GPTTrainingService:
                 env=env,
                 cwd=self.gpt_sovits_root
             )
-            output_thread = self._start_output_forwarder(process, log_handle, job_id)
+            output_thread = self._start_output_forwarder(process, log_handle, job_id, output_tail)
             
             # 记录训练任务
             self.training_jobs[job_id] = {
@@ -400,6 +428,7 @@ class GPTTrainingService:
                 "config_file": config_file,
                 "log_file": log_file,
                 "log_handle": log_handle,
+                "output_tail": output_tail,
                 "s1_dir": s1_dir,
                 "start_time": datetime.now(),
                 "status": "running",
@@ -466,22 +495,22 @@ class GPTTrainingService:
         process = job_info["process"]
         
         # 检查进程状态
-        if process.poll() is None:
+        previous_status = job_info.get("status")
+        if previous_status == "stopped":
+            status = "stopped"
+        elif process.poll() is None:
             status = "running"
         elif process.returncode == 0:
             status = "completed"
             job_info["status"] = "completed"
-            job_info["end_time"] = datetime.now()
-            log_handle = job_info.get("log_handle")
-            if log_handle and not log_handle.closed:
-                log_handle.close()
+            job_info.setdefault("end_time", datetime.now())
+            self._finish_log_forwarding(job_info)
         else:
             status = "failed"
             job_info["status"] = "failed"
-            job_info["end_time"] = datetime.now()
-            log_handle = job_info.get("log_handle")
-            if log_handle and not log_handle.closed:
-                log_handle.close()
+            job_info.setdefault("end_time", datetime.now())
+            self._finish_log_forwarding(job_info)
+            job_info["error_message"] = self._get_process_error(job_info, process.returncode)
         
         return GPTTrainingStatus(
             job_id=job_id,
@@ -490,7 +519,8 @@ class GPTTrainingService:
             total_epochs=job_info["request"].config.total_epoch,
             start_time=job_info["start_time"],
             end_time=job_info.get("end_time"),
-            log_file=job_info["log_file"]
+            error_message=job_info.get("error_message"),
+            log_file=job_info["log_file"],
         )
     
     def stop_training(self, job_id: str) -> bool:
@@ -515,9 +545,7 @@ class GPTTrainingService:
                 process.wait(timeout=10)  # 等待10秒
                 job_info["status"] = "stopped"
                 job_info["end_time"] = datetime.now()
-            log_handle = job_info.get("log_handle")
-            if log_handle and not log_handle.closed:
-                log_handle.close()
+            self._finish_log_forwarding(job_info)
             return True
         except Exception as e:
             print(f"停止训练失败: {e}")
