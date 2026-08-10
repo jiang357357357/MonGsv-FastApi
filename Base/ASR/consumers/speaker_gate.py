@@ -6,6 +6,7 @@ from Code.FastApi.Base.ASR.services import voice_service
 
 DEFAULT_SPEAKER_THRESHOLD = 0.75
 DEFAULT_MIN_SPEAKER_AUDIO_MS = 1000
+DEFAULT_PERSONAL_SPEAKER_ID = "personal-owner"
 
 
 @dataclass(frozen=True)
@@ -16,10 +17,16 @@ class SpeakerGateDecision:
     speaker_info: dict | None = None
 
 
+def personal_speaker_id() -> str:
+    """Return the single voiceprint identity used by personal deployments."""
+    value = str(os.getenv("PERSONAL_SPEAKER_ID", DEFAULT_PERSONAL_SPEAKER_ID) or "").strip()
+    return value or DEFAULT_PERSONAL_SPEAKER_ID
+
+
 def speaker_id_from_start(data: dict) -> str:
-    """Use the authenticated upstream user id as the registered speaker id."""
-    value = data.get("speaker_id", data.get("user_id", ""))
-    return str(value or "").strip()
+    """Bind every streaming ASR session to the personal owner's voiceprint."""
+    del data
+    return personal_speaker_id()
 
 
 def configured_threshold() -> float:

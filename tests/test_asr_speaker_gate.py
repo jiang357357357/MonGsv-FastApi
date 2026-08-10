@@ -1,12 +1,17 @@
 import unittest
 import tempfile
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import numpy as np
 
 from Code.FastApi.Base.ASR.consumers.final import ASRFinalWebSocketHandler
-from Code.FastApi.Base.ASR.consumers.speaker_gate import SpeakerGateDecision
+from Code.FastApi.Base.ASR.consumers.speaker_gate import (
+    SpeakerGateDecision,
+    personal_speaker_id,
+    speaker_id_from_start,
+)
 from Code.FastApi.Base.ASR.services import voice_service
 from Code.FastApi.Base.ASR.services.speaker_db import SpeakerDatabase
 from Code.FastApi.Base.ASR.services.voice_service import VoiceService
@@ -82,6 +87,16 @@ class SpeakerDatabaseTests(unittest.TestCase):
                 self.assertFalse(other["is_registered"])
             finally:
                 database.client._system.stop()
+
+
+class PersonalSpeakerIdentityTests(unittest.TestCase):
+    def test_streaming_sessions_always_use_personal_owner(self):
+        with patch.dict(os.environ, {"PERSONAL_SPEAKER_ID": "owner-voiceprint"}):
+            self.assertEqual(personal_speaker_id(), "owner-voiceprint")
+            self.assertEqual(
+                speaker_id_from_start({"speaker_id": "another-user", "user_id": "ignored"}),
+                "owner-voiceprint",
+            )
 
 
 class VoiceServiceGateTests(unittest.TestCase):

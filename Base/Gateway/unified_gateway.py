@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from Code.FastApi.Base.Hub.monhub_bridge import create_monhub_bridge_from_env
+from Code.FastApi.Base.ASR.consumers.speaker_gate import personal_speaker_id
 from Code.FastApi.Base.monconfig import MonConfig
 from Code.FastApi.Base.Gateway.config import build_runtime_config
 from Code.FastApi.Base.Gateway.resources import (
@@ -506,14 +507,14 @@ async def asr_recognize(
 async def inference_transcribe(
     audio_file: UploadFile | None = File(default=None),
     audio_path: str = Form(default=""),
-    speaker_id: str = Form(...),
+    speaker_id: str = Form(default=""),
     language: str = Form(default="zh"),
     model_type: str = Form(default="funasr"),
     model_size: str = Form(default="large"),
     precision: str = Form(default="float32"),
     user: Any = Depends(get_current_user),
 ):
-    """面向前端的声纹门禁单文件转录接口。"""
+    """面向前端的个人声纹门禁单文件转录接口。"""
     service = _ensure_service("asr_recognition")
 
     upload_temp_dir: Optional[str] = None
@@ -554,7 +555,7 @@ async def inference_transcribe(
         threshold = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.75"))
         speaker_authorization = speaker_gate_service.authorize_audio_for_speaker(
             speaker_wav,
-            speaker_id,
+            personal_speaker_id(),
             threshold,
         )
         if speaker_authorization["status"] != "authorized":
@@ -1936,11 +1937,12 @@ async def ws_tts_stream(websocket: WebSocket):
 @app.post("/asr/speaker/register/")
 async def asr_speaker_register(
     audio_file: UploadFile = File(...),
-    speaker_id: str = Form(...),
+    speaker_id: str = Form(default=""),
     name: str = Form(...),
     user: Any = Depends(get_current_user),
 ):
-    """注册说话人声纹。"""
+    """注册或更新唯一的个人声纹。"""
+    speaker_id = personal_speaker_id()
     cleanup_paths: list[str] = []
     try:
         import tempfile
@@ -1973,10 +1975,11 @@ async def asr_speaker_register(
 
 @app.post("/asr/speaker/unregister/")
 async def asr_speaker_unregister(
-    speaker_id: str = Form(...),
+    speaker_id: str = Form(default=""),
     user: Any = Depends(get_current_user),
 ):
-    """注销说话人。"""
+    """注销唯一的个人声纹。"""
+    speaker_id = personal_speaker_id()
     try:
         success = asr_voice_service.speaker_db.unregister(speaker_id)
         if success:
@@ -1992,9 +1995,10 @@ async def asr_speaker_unregister(
 async def asr_speaker_list(
     user: Any = Depends(get_current_user),
 ):
-    """列出已注册的说话人。"""
+    """返回个人声纹的注册状态。"""
     try:
-        speakers = asr_voice_service.speaker_db.list_speakers()
+        speaker = asr_voice_service.speaker_db.get_speaker(personal_speaker_id())
+        speakers = [speaker] if speaker else []
         return {"success": True, "speakers": speakers, "count": len(speakers)}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"获取列表失败: {exc}")
@@ -2112,10 +2116,11 @@ async def asr_diarize(
 async def asr_transcribe(
     audio_file: UploadFile = File(...),
     language: str = Form(default="auto"),
-    speaker_id: str = Form(...),
+    speaker_id: str = Form(default=""),
     user: Any = Depends(get_current_user),
 ):
-    """声纹门禁 ASR：仅转写与指定当前用户匹配的单文件。"""
+    """个人声纹门禁 ASR：仅转写与主人声纹匹配的单文件。"""
+    speaker_id = personal_speaker_id()
     cleanup_paths: list[str] = []
     try:
         import tempfile
