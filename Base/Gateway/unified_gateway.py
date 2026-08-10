@@ -1869,10 +1869,9 @@ async def ws_asr_transcribe(websocket: WebSocket):
         print(f"[WS-ASR] WebSocket异常: {exc}")
 
 
-@app.websocket("/ws/asr/final")
-async def ws_asr_final(websocket: WebSocket):
+async def _serve_asr_final(websocket: WebSocket, require_speaker_gate: bool) -> None:
     from Code.FastApi.Base.ASR.consumers.final import ASRFinalWebSocketHandler
-    handler = ASRFinalWebSocketHandler()
+    handler = ASRFinalWebSocketHandler(require_speaker_gate=require_speaker_gate)
     await websocket.accept()
     await handler.handle_connect(websocket)
     try:
@@ -1888,6 +1887,18 @@ async def ws_asr_final(websocket: WebSocket):
                 break
     except Exception as exc:
         print(f"[WS-ASR-FINAL] WebSocket异常: {exc}")
+
+
+@app.websocket("/ws/asr/final")
+async def ws_asr_final(websocket: WebSocket):
+    """普通 VAD 断句实时识别，不启用声纹门禁。"""
+    await _serve_asr_final(websocket, require_speaker_gate=False)
+
+
+@app.websocket("/ws/asr/final/voiceprint")
+async def ws_asr_final_voiceprint(websocket: WebSocket):
+    """逐句验证当前个人声纹，通过后才执行并返回 ASR。"""
+    await _serve_asr_final(websocket, require_speaker_gate=True)
 
 
 @app.websocket("/ws/asr/vad")

@@ -123,7 +123,7 @@ class FinalSpeakerGateTests(unittest.IsolatedAsyncioTestCase):
         voice_service._asr = self.previous_asr
 
     async def test_rejected_speaker_never_runs_asr_or_returns_text(self):
-        handler = ASRFinalWebSocketHandler()
+        handler = ASRFinalWebSocketHandler(require_speaker_gate=True)
         handler.expected_speaker_id = "user-1"
         websocket = FakeWebSocket()
         rejected = SpeakerGateDecision(
@@ -144,7 +144,7 @@ class FinalSpeakerGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(message.get("code") == "VOICEPRINT_MISMATCH" for message in websocket.messages))
 
     async def test_matched_speaker_runs_asr_and_returns_verified_result(self):
-        handler = ASRFinalWebSocketHandler()
+        handler = ASRFinalWebSocketHandler(require_speaker_gate=True)
         handler.expected_speaker_id = "user-1"
         websocket = FakeWebSocket()
         accepted = SpeakerGateDecision(
@@ -170,6 +170,39 @@ class FinalSpeakerGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["text"], "验证通过。")
         self.assertTrue(results[0]["speaker_verified"])
+
+    async def test_plain_mode_runs_asr_without_speaker_verification(self):
+        handler = ASRFinalWebSocketHandler(require_speaker_gate=False)
+        websocket = FakeWebSocket()
+        verify_mock = AsyncMock()
+
+        with patch(
+            "Code.FastApi.Base.ASR.consumers.final.verify_current_speaker",
+            new=verify_mock,
+        ):
+            await handler._finalize_pcm(
+                websocket,
+                (self.audio * 32768).astype(np.int16).tobytes(),
+                "test",
+            )
+
+        results = [message for message in websocket.messages if message.get("type") == "result"]
+        self.assertEqual(self.fake_asr.transcribe_calls, 1)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["speaker_verified"])
+        verify_mock.assert_not_awaited()
+
+    async def test_connection_payload_distinguishes_plain_and_voiceprint_modes(self):
+        plain_socket = FakeWebSocket()
+        gated_socket = FakeWebSocket()
+
+        await ASRFinalWebSocketHandler(False).handle_connect(plain_socket)
+        await ASRFinalWebSocketHandler(True).handle_connect(gated_socket)
+
+        self.assertEqual(plain_socket.messages[0]["protocol"], "vad-final-v1")
+        self.assertEqual(plain_socket.messages[0]["speaker_gate"], "disabled")
+        self.assertEqual(gated_socket.messages[0]["protocol"], "vad-final-speaker-gate-v1")
+        self.assertEqual(gated_socket.messages[0]["speaker_gate"], "required")
 
 
 if __name__ == "__main__":
