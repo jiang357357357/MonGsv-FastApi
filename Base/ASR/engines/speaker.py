@@ -11,8 +11,8 @@ class SpeakerManager:
         print("[Speaker] 声纹模型加载完成")
 
     def get_embedding(self, audio_path):
-        res = self.pipeline(audio_path)
-        return res["spk_embedding"]
+        res = self.pipeline([str(audio_path)], output_emb=True)
+        return res["embs"][0]
 
     def compare(self, emb1, emb2):
         v1 = emb1.flatten()
