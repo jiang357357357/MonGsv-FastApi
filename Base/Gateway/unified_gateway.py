@@ -2022,7 +2022,7 @@ async def asr_speaker_identify(
         cleanup_paths.append(tmp_path)
 
         import subprocess
-        wav_path = tmp_path.replace(suffix, ".wav")
+        wav_path = f"{tmp_path}.normalized.wav"
         cleanup_paths.append(wav_path)
         subprocess.run([
             os.environ.get("FFMPEG_PATH", "ffmpeg"),
