@@ -79,6 +79,52 @@ class SpeakerDatabase:
         print(f"[SpeakerDB] 未识别: 最高 {similarity:.4f} < {threshold}")
         return {"speaker_id": None, "name": "Unknown", "similarity": round(similarity, 4), "is_known": False}
 
+    def verify(self, speaker_id, embedding, threshold=0.75):
+        """Compare an embedding with one explicitly selected registered speaker."""
+        speaker_id = str(speaker_id or "").strip()
+        if not speaker_id:
+            return {
+                "speaker_id": None,
+                "name": "Unknown",
+                "similarity": 0.0,
+                "is_registered": False,
+                "is_match": False,
+            }
+
+        results = self.collection.get(
+            ids=[speaker_id],
+            include=["embeddings", "metadatas"],
+        )
+        if not results["ids"]:
+            print(f"[SpeakerDB] 指定说话人未注册: {speaker_id}")
+            return {
+                "speaker_id": speaker_id,
+                "name": "Unknown",
+                "similarity": 0.0,
+                "is_registered": False,
+                "is_match": False,
+            }
+
+        candidate = np.asarray(embedding, dtype=np.float32).flatten()
+        enrolled = np.asarray(results["embeddings"][0], dtype=np.float32).flatten()
+        denominator = float(np.linalg.norm(candidate) * np.linalg.norm(enrolled))
+        similarity = float(np.dot(candidate, enrolled) / denominator) if denominator > 0 else 0.0
+        similarity = max(0.0, min(1.0, similarity))
+        metadata = results["metadatas"][0] or {}
+        name = metadata.get("name", "Unknown")
+        is_match = similarity >= threshold
+        print(
+            f"[SpeakerDB] 指定说话人验证: {speaker_id} ({name}) "
+            f"similarity={similarity:.4f} threshold={threshold:.4f} match={is_match}"
+        )
+        return {
+            "speaker_id": speaker_id,
+            "name": name,
+            "similarity": round(similarity, 4),
+            "is_registered": True,
+            "is_match": is_match,
+        }
+
     def list_speakers(self):
         results = self.collection.get()
         speakers = []

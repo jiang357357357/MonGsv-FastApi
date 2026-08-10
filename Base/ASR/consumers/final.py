@@ -1,9 +1,13 @@
 import json
 import math
-import os
 
 import numpy as np
 from Code.FastApi.Base.ASR.services import voice_service
+from Code.FastApi.Base.ASR.consumers.speaker_gate import (
+    configured_min_audio_ms,
+    speaker_id_from_start,
+    verify_current_speaker,
+)
 
 PUNCTUATION_CHARS = set("，。！？；：、,.!?;:")
 VAD_CHUNK_MS = 200
@@ -41,6 +45,8 @@ class ASRFinalWebSocketHandler:
         self.noise_level = 0.0
         self.low_volume_chunks = 0
         self.last_endpoint_silence_ms = 0
+        self.expected_speaker_id = ""
+        self.missing_speaker_warned = False
         self._reset_vad_config()
 
     def _reset_vad_config(self):
@@ -51,7 +57,7 @@ class ASRFinalWebSocketHandler:
         self.end_silence_ms = VAD_CHUNK_MS * END_SILENCE_CHUNKS
         self.end_silence_chunks = END_SILENCE_CHUNKS
         self.speech_noise_threshold = SPEECH_NOISE_THRESHOLD
-        self.min_speech_duration_ms = MIN_SPEECH_DURATION_MS
+        self.min_speech_duration_ms = max(MIN_SPEECH_DURATION_MS, configured_min_audio_ms())
 
     def _apply_vad_config(self, data: dict):
         vad = data.get("vad") if isinstance(data.get("vad"), dict) else {}
@@ -62,7 +68,10 @@ class ASRFinalWebSocketHandler:
         if "speech_noise_threshold" in vad:
             self.speech_noise_threshold = float(vad["speech_noise_threshold"])
         if "min_speech_duration_ms" in vad:
-            self.min_speech_duration_ms = int(vad["min_speech_duration_ms"])
+            self.min_speech_duration_ms = max(
+                int(vad["min_speech_duration_ms"]),
+                configured_min_audio_ms(),
+            )
 
         end_silence_ms = vad.get("end_silence_ms", data.get("end_silence_ms"))
         if end_silence_ms is not None:
@@ -99,6 +108,8 @@ class ASRFinalWebSocketHandler:
         self.noise_level = 0.0
         self.low_volume_chunks = 0
         self.last_endpoint_silence_ms = 0
+        self.expected_speaker_id = ""
+        self.missing_speaker_warned = False
 
     async def handle_connect(self, websocket):
         self._reset_session_state()
@@ -106,7 +117,8 @@ class ASRFinalWebSocketHandler:
             "type": "connection",
             "status": "connected",
             "message": "VAD final STT 已就绪",
-            "protocol": "vad-final-v1",
+            "protocol": "vad-final-speaker-gate-v1",
+            "speaker_gate": "required",
             "audio_format": {
                 "sample_rate": self.sample_rate,
                 "channels": 1,
@@ -116,6 +128,11 @@ class ASRFinalWebSocketHandler:
 
     async def handle_audio(self, websocket, bytes_data):
         if not bytes_data:
+            return
+        if not self.expected_speaker_id:
+            if not self.missing_speaker_warned:
+                self.missing_speaker_warned = True
+                await self._send_warning(websocket, "VOICEPRINT_REQUIRED", "请先发送包含 speaker_id 的 start 指令")
             return
         if len(bytes_data) % 2 != 0:
             await self._send_warning(
@@ -147,16 +164,25 @@ class ASRFinalWebSocketHandler:
     async def _on_start(self, websocket, data: dict):
         print("[WS-ASR-FINAL] 开始录音")
         self._reset_session_state()
+        self.expected_speaker_id = speaker_id_from_start(data)
         self._reset_vad_config()
         self._apply_vad_config(data)
+        if not self.expected_speaker_id:
+            await self._send_warning(websocket, "VOICEPRINT_REQUIRED", "start 指令必须包含当前用户 speaker_id")
+            return
         print(f"[WS-ASR-FINAL] VAD配置: {self._vad_config_payload()}")
         await websocket.send_json({
             "type": "status",
             "message": "开始录音",
+            "speaker_id": self.expected_speaker_id,
             "vad": self._vad_config_payload(),
         })
 
     async def _on_stop(self, websocket):
+        if not self.expected_speaker_id:
+            await self._send_warning(websocket, "VOICEPRINT_REQUIRED", "当前会话未绑定用户声纹")
+            await self._send_commit_hint(websocket, "speaker_required", False)
+            return
         raw_duration = len(self.raw_pcm) / 2 / self.sample_rate if self.raw_pcm else 0
         print(f"[WS-ASR-FINAL] 停止录音: raw={len(self.raw_pcm)}B/{raw_duration:.2f}s "
               f"vad_calls={self.vad_process_count} vad_hits={self.vad_hit_count} "
@@ -293,6 +319,15 @@ class ASRFinalWebSocketHandler:
 
         print(f"[WS-ASR-FINAL] 最终确认[{source}]: {len(pcm_data)}B, {duration:.2f}s, {energy_db:.1f}dB")
 
+        speaker_decision = await verify_current_speaker(
+            speech_float,
+            self.sample_rate,
+            self.expected_speaker_id,
+        )
+        if not speaker_decision.allowed:
+            await self._reject_speaker(websocket, speaker_decision, source)
+            return
+
         from asgiref.sync import sync_to_async
         result = await sync_to_async(voice_service.asr.transcribe_array)(speech_float, self.sample_rate)
         text = result.get("text", "").strip()
@@ -308,15 +343,7 @@ class ASRFinalWebSocketHandler:
         self.segment_index += 1
         self.accumulated_text = (self.accumulated_text + " " + text).strip()
 
-        speaker_info = None
-        if os.getenv("ENABLE_ASR_SPEAKER", "").lower() in {"1", "true", "yes"}:
-            try:
-                threshold = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.75"))
-                speaker_info = await sync_to_async(voice_service.identify_speaker_from_array)(
-                    speech_float, self.sample_rate, threshold,
-                )
-            except Exception as exc:
-                print(f"[WS-ASR-FINAL] 声纹识别失败（跳过）: {exc}")
+        speaker_info = speaker_decision.speaker_info or {}
 
         await websocket.send_json({
             "type": "result",
@@ -327,13 +354,29 @@ class ASRFinalWebSocketHandler:
             "segment_index": self.segment_index,
             "source": source,
             "duration": duration,
-            "speaker_id": speaker_info.get("speaker_id") if speaker_info else None,
-            "speaker_name": speaker_info.get("name") if speaker_info else None,
-            "speaker_similarity": speaker_info.get("similarity") if speaker_info else None,
-            "speaker_is_known": speaker_info.get("is_known") if speaker_info else None,
+            "speaker_id": speaker_info.get("speaker_id"),
+            "speaker_name": speaker_info.get("name"),
+            "speaker_similarity": speaker_info.get("similarity"),
+            "speaker_verified": True,
         })
         await self._send_commit_hint(websocket, self._commit_reason(source, text), True)
         print(f"[WS-ASR-FINAL] final#{self.segment_index}: '{text}', accumulated: '{self.accumulated_text}'")
+
+    async def _reject_speaker(self, websocket, decision, source: str):
+        info = decision.speaker_info or {}
+        print(
+            f"[WS-ASR-FINAL] 声纹门禁拒绝[{source}]: code={decision.code} "
+            f"speaker={self.expected_speaker_id} similarity={info.get('similarity')}"
+        )
+        await self._send_warning(websocket, decision.code, decision.message)
+        await websocket.send_json({
+            "type": "speaker_gate",
+            "accepted": False,
+            "code": decision.code,
+            "speaker_id": self.expected_speaker_id,
+            "speaker_similarity": info.get("similarity"),
+        })
+        await self._send_commit_hint(websocket, "speaker_rejected", False)
 
     def _append_preroll(self, audio_data: bytes):
         self.pre_speech_pcm.extend(audio_data)

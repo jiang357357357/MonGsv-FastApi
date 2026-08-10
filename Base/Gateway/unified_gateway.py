@@ -193,6 +193,48 @@ def _ensure_service(name: str):
     return service
 
 
+def _prepare_speaker_gate_wav(input_path: str, output_dir: str) -> str:
+    """Normalize arbitrary supported input before VAD and speaker verification."""
+    import subprocess
+
+    output_path = str(Path(output_dir) / f"speaker_gate_{uuid.uuid4().hex}.wav")
+    completed = subprocess.run(
+        [
+            os.environ.get("FFMPEG_PATH", "ffmpeg"),
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", input_path,
+            "-ar", "16000",
+            "-ac", "1",
+            "-y", output_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        message = completed.stderr.strip() or "音频转换失败"
+        raise HTTPException(status_code=400, detail=f"声纹验证音频预处理失败: {message}")
+    return output_path
+
+
+def _raise_speaker_gate_denied(result: dict) -> None:
+    status = result.get("status", "speaker_denied")
+    messages = {
+        "speaker_required": "缺少当前用户 speaker_id",
+        "speaker_not_registered": "当前用户尚未注册声纹",
+        "speaker_mismatch": "说话人不是当前用户",
+        "speaker_audio_too_short": "语音过短，无法可靠验证当前用户",
+    }
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": status.upper(),
+            "message": messages.get(status, "声纹验证未通过"),
+            "speaker": result.get("speaker_info"),
+        },
+    )
+
+
 class WorkflowAbortError(RuntimeError):
     """Raised when a workflow must stop before launching training."""
 
@@ -464,13 +506,14 @@ async def asr_recognize(
 async def inference_transcribe(
     audio_file: UploadFile | None = File(default=None),
     audio_path: str = Form(default=""),
+    speaker_id: str = Form(...),
     language: str = Form(default="zh"),
     model_type: str = Form(default="funasr"),
     model_size: str = Form(default="large"),
     precision: str = Form(default="float32"),
     user: Any = Depends(get_current_user),
 ):
-    """面向前端单文件转录的轻量接口。"""
+    """面向前端的声纹门禁单文件转录接口。"""
     service = _ensure_service("asr_recognition")
 
     upload_temp_dir: Optional[str] = None
@@ -506,6 +549,17 @@ async def inference_transcribe(
         else:
             raise HTTPException(status_code=400, detail="请上传音频文件或提供音频路径")
 
+        speaker_wav = _prepare_speaker_gate_wav(input_path, output_temp_dir)
+        from Code.FastApi.Base.ASR import voice_service as speaker_gate_service
+        threshold = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.75"))
+        speaker_authorization = speaker_gate_service.authorize_audio_for_speaker(
+            speaker_wav,
+            speaker_id,
+            threshold,
+        )
+        if speaker_authorization["status"] != "authorized":
+            _raise_speaker_gate_denied(speaker_authorization)
+
         request = ASRRequest(
             input_path=input_path,
             output_dir=output_temp_dir,
@@ -536,6 +590,7 @@ async def inference_transcribe(
             "language": resolved_language,
             "segments": recognition_results,
             "processing_time": getattr(result, "processing_time", 0.0),
+            "speaker": speaker_authorization.get("speaker_info"),
         }
     except HTTPException:
         raise
@@ -1898,7 +1953,7 @@ async def asr_speaker_register(
         cleanup_paths.append(tmp_path)
 
         import subprocess
-        wav_path = tmp_path.replace(suffix, ".wav")
+        wav_path = f"{tmp_path}.normalized.wav"
         cleanup_paths.append(wav_path)
         subprocess.run([
             os.environ.get("FFMPEG_PATH", "ffmpeg"),
@@ -2057,9 +2112,10 @@ async def asr_diarize(
 async def asr_transcribe(
     audio_file: UploadFile = File(...),
     language: str = Form(default="auto"),
+    speaker_id: str = Form(...),
     user: Any = Depends(get_current_user),
 ):
-    """统一 ASR 转写接口（流式 Paraformer，单文件）。"""
+    """声纹门禁 ASR：仅转写与指定当前用户匹配的单文件。"""
     cleanup_paths: list[str] = []
     try:
         import tempfile
@@ -2071,20 +2127,26 @@ async def asr_transcribe(
         cleanup_paths.append(tmp_path)
 
         import subprocess
-        wav_path = tmp_path.replace(suffix, ".wav")
+        wav_path = f"{tmp_path}.normalized.wav"
         cleanup_paths.append(wav_path)
         subprocess.run([
             os.environ.get("FFMPEG_PATH", "ffmpeg"),
             "-i", tmp_path, "-ar", "16000", "-ac", "1", "-y", wav_path,
         ], capture_output=True, check=True)
 
-        result = asr_voice_service.process_audio(wav_path)
+        threshold = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.75"))
+        result = asr_voice_service.process_audio_for_speaker(wav_path, speaker_id, threshold)
+        if result["status"].startswith("speaker_"):
+            _raise_speaker_gate_denied(result)
         return {
             "success": result["status"] == "success",
             "text": result.get("text", ""),
             "status": result["status"],
             "segments": result.get("segments", []),
+            "speaker": result.get("speaker_info"),
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"ASR 转写失败: {exc}")
     finally:
