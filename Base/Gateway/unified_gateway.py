@@ -236,6 +236,22 @@ def _raise_speaker_gate_denied(result: dict) -> None:
     )
 
 
+def _authorize_transcription_speaker(input_path: str, output_dir: str) -> dict:
+    """Verify that a single-file transcription belongs to the personal speaker."""
+    speaker_wav = _prepare_speaker_gate_wav(input_path, output_dir)
+    from Code.FastApi.Base.ASR import voice_service as speaker_gate_service
+
+    threshold = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.75"))
+    authorization = speaker_gate_service.authorize_audio_for_speaker(
+        speaker_wav,
+        personal_speaker_id(),
+        threshold,
+    )
+    if authorization["status"] != "authorized":
+        _raise_speaker_gate_denied(authorization)
+    return authorization
+
+
 class WorkflowAbortError(RuntimeError):
     """Raised when a workflow must stop before launching training."""
 
@@ -503,18 +519,16 @@ async def asr_recognize(
                 pass
 
 
-@app.post("/inference/transcribe")
-async def inference_transcribe(
-    audio_file: UploadFile | None = File(default=None),
-    audio_path: str = Form(default=""),
-    speaker_id: str = Form(default=""),
-    language: str = Form(default="zh"),
-    model_type: str = Form(default="funasr"),
-    model_size: str = Form(default="large"),
-    precision: str = Form(default="float32"),
-    user: Any = Depends(get_current_user),
+async def _inference_transcribe(
+    audio_file: UploadFile | None,
+    audio_path: str,
+    language: str,
+    model_type: str,
+    model_size: str,
+    precision: str,
+    require_speaker_gate: bool,
 ):
-    """面向前端的个人声纹门禁单文件转录接口。"""
+    """Shared implementation for ordinary and voiceprint-gated transcription."""
     service = _ensure_service("asr_recognition")
 
     upload_temp_dir: Optional[str] = None
@@ -550,16 +564,11 @@ async def inference_transcribe(
         else:
             raise HTTPException(status_code=400, detail="请上传音频文件或提供音频路径")
 
-        speaker_wav = _prepare_speaker_gate_wav(input_path, output_temp_dir)
-        from Code.FastApi.Base.ASR import voice_service as speaker_gate_service
-        threshold = float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.75"))
-        speaker_authorization = speaker_gate_service.authorize_audio_for_speaker(
-            speaker_wav,
-            personal_speaker_id(),
-            threshold,
+        speaker_authorization = (
+            _authorize_transcription_speaker(input_path, output_temp_dir)
+            if require_speaker_gate
+            else None
         )
-        if speaker_authorization["status"] != "authorized":
-            _raise_speaker_gate_denied(speaker_authorization)
 
         request = ASRRequest(
             input_path=input_path,
@@ -591,7 +600,8 @@ async def inference_transcribe(
             "language": resolved_language,
             "segments": recognition_results,
             "processing_time": getattr(result, "processing_time", 0.0),
-            "speaker": speaker_authorization.get("speaker_info"),
+            "speaker": speaker_authorization.get("speaker_info") if speaker_authorization else None,
+            "speaker_verified": speaker_authorization is not None,
         }
     except HTTPException:
         raise
@@ -602,6 +612,50 @@ async def inference_transcribe(
             shutil.rmtree(upload_temp_dir, ignore_errors=True)
         if output_temp_dir and os.path.exists(output_temp_dir):
             shutil.rmtree(output_temp_dir, ignore_errors=True)
+
+
+@app.post("/inference/transcribe")
+async def inference_transcribe(
+    audio_file: UploadFile | None = File(default=None),
+    audio_path: str = Form(default=""),
+    language: str = Form(default="zh"),
+    model_type: str = Form(default="funasr"),
+    model_size: str = Form(default="large"),
+    precision: str = Form(default="float32"),
+    user: Any = Depends(get_current_user),
+):
+    """Transcribe one audio file without requiring voiceprint verification."""
+    return await _inference_transcribe(
+        audio_file=audio_file,
+        audio_path=audio_path,
+        language=language,
+        model_type=model_type,
+        model_size=model_size,
+        precision=precision,
+        require_speaker_gate=False,
+    )
+
+
+@app.post("/inference/transcribe/voiceprint")
+async def inference_transcribe_with_voiceprint(
+    audio_file: UploadFile | None = File(default=None),
+    audio_path: str = Form(default=""),
+    language: str = Form(default="zh"),
+    model_type: str = Form(default="funasr"),
+    model_size: str = Form(default="large"),
+    precision: str = Form(default="float32"),
+    user: Any = Depends(get_current_user),
+):
+    """Transcribe one audio file only after personal voiceprint verification."""
+    return await _inference_transcribe(
+        audio_file=audio_file,
+        audio_path=audio_path,
+        language=language,
+        model_type=model_type,
+        model_size=model_size,
+        precision=precision,
+        require_speaker_gate=True,
+    )
 
 
 @app.post("/inference/transcribe/models/load")
