@@ -166,8 +166,18 @@ def build_role_router() -> APIRouter:
             return error_response(400, str(exc))
 
     @router.get("/api/role/workspace/list/")
-    async def list_role_workspaces():
-        workspaces = service.list_role_workspaces()
+    async def list_role_workspaces(
+        role_name: str | None = Query(default=None),
+        world_name: str | None = Query(default=None),
+        base_version: str | None = Query(default=None),
+        include_files: bool = Query(default=True),
+    ):
+        workspaces = service.list_role_workspaces(
+            role_name=role_name,
+            world_name=world_name,
+            base_version=base_version,
+            include_files=include_files,
+        )
         return RoleWorkspaceListResponse(
             workspaces=workspaces,
             count=len(workspaces),

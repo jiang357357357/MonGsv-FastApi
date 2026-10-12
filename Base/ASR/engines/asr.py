@@ -260,14 +260,15 @@ class FasterWhisperEngine:
             print(f"[ASR] Whisper 文件识别失败: {e}")
             return {"text": ""}
 
-    def transcribe_array(self, audio_array: np.ndarray, sample_rate: int = 16000, language: str = "auto") -> dict:
+    def transcribe_array(self, audio_array: np.ndarray, sample_rate: int = 16000, language: str = "auto",
+                         model_size: str = "large-v3", precision: str = "float16") -> dict:
         try:
             import tempfile
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             try:
                 import soundfile
                 soundfile.write(tmp.name, audio_array, sample_rate)
-                model = self.create_model()
+                model = self.create_model(model_size, precision)
                 _, text = self.transcribe_with_model(model, tmp.name, language)
                 return {"text": text}
             finally:
@@ -344,10 +345,17 @@ class ASRManager:
         return self.streaming.transcribe_streaming(audio_data, cache, is_final)
 
     def transcribe_array(self, audio_array: np.ndarray, sample_rate: int = 16000,
-                         language: str = "zh", engine: str = "") -> dict:
+                         language: str = "zh", engine: str = "",
+                         model_size: str = "large-v3", precision: str = "float16") -> dict:
         e = engine or self.select_engine(language)
         if e == self.ENGINE_WHISPER:
-            return self.whisper.transcribe_array(audio_array, sample_rate, language)
+            return self.whisper.transcribe_array(
+                audio_array,
+                sample_rate,
+                language,
+                model_size=model_size,
+                precision=precision,
+            )
         if e == self.ENGINE_FUNASR:
             return self.funasr.transcribe_array(audio_array, sample_rate, language)
         return self.streaming.transcribe_array(audio_array, sample_rate)
@@ -361,10 +369,16 @@ class ASRManager:
         return self.streaming.transcribe(audio_path)
 
     def batch_transcribe(self, input_path: str, language: str = "zh",
-                         engine: str = "") -> Tuple[str, List[Dict[str, str]]]:
+                         engine: str = "", model_size: str = "large-v3",
+                         precision: str = "float16") -> Tuple[str, List[Dict[str, str]]]:
         e = engine or self.select_engine(language)
         if e == self.ENGINE_WHISPER:
-            return self.whisper.batch_transcribe(input_path, language)
+            return self.whisper.batch_transcribe(
+                input_path,
+                language,
+                model_size=model_size,
+                precision=precision,
+            )
         if e == self.ENGINE_FUNASR:
             return self.funasr.batch_transcribe(input_path, language)
         return self.streaming.batch_transcribe(input_path, language)

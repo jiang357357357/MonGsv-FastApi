@@ -276,7 +276,11 @@ class ASRRecognitionService:
             engine_type = UnifiedASREngine.ENGINE_WHISPER
 
         output_file_name, recognition_results = self.current_model.batch_transcribe(
-            input_path, config.language, engine=engine_type,
+            input_path,
+            config.language,
+            engine=engine_type,
+            model_size=config.model_size,
+            precision=config.precision,
         )
         output_file = write_output_file(output_dir, output_file_name, recognition_results)
         return output_file, recognition_results

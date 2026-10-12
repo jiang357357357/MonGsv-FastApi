@@ -57,7 +57,14 @@ class RoleService:
         entry = self._require_role_entry(role_id)
         return entry.info
 
-    def list_role_workspaces(self) -> list[dict]:
+    def list_role_workspaces(
+        self,
+        *,
+        role_name: str | None = None,
+        world_name: str | None = None,
+        base_version: str | None = None,
+        include_files: bool = True,
+    ) -> list[dict]:
         model_root = self._model_root()
         workspaces: list[dict] = []
         if not model_root.exists():
@@ -65,32 +72,31 @@ class RoleService:
         for role_model_root in sorted(model_root.glob("*/*/*"), key=lambda item: str(item).lower()):
             if not role_model_root.is_dir():
                 continue
-            world_name, role_name, base_version = role_model_root.parts[-3:]
-            train_root = self._latest_train_root(world_name, role_name, base_version)
+            workspace_world, workspace_role, workspace_version = role_model_root.parts[-3:]
+            if role_name and workspace_role != role_name:
+                continue
+            if world_name and workspace_world != world_name:
+                continue
+            if base_version and workspace_version != base_version:
+                continue
+            train_root = self._latest_train_root(workspace_world, workspace_role, workspace_version)
             model_sliced_dir = role_model_root / "sliced"
             raw_dir = train_root / "source" / "raw" if train_root else None
             prompt_dir = train_root / "source" / "prompt" if train_root else None
             sliced_dir = train_root / "dataset" / "sliced" if train_root else None
             gpt_weights_dir = role_model_root / "GPT"
             sovits_weights_dir = role_model_root / "SoVITS"
-            model_sliced_files = self._list_files(model_sliced_dir)
-            sliced_files = self._list_files(sliced_dir)
-            raw_files = self._list_files(raw_dir)
-            prompt_files = self._list_files(prompt_dir)
-            gpt_models = self._list_files(gpt_weights_dir, {".ckpt"})
-            sovits_models = self._list_files(sovits_weights_dir, {".pth"})
-            print(
-                "[role-workspace] "
-                f"world={world_name} role={role_name} version={base_version} "
-                f"model_sliced={len(model_sliced_files)} train_sliced={len(sliced_files)} "
-                f"model_dir={model_sliced_dir} train_dir={sliced_dir or ''}",
-                flush=True,
-            )
+            model_sliced_files = self._list_files(model_sliced_dir) if include_files else []
+            sliced_files = self._list_files(sliced_dir) if include_files else []
+            raw_files = self._list_files(raw_dir) if include_files else []
+            prompt_files = self._list_files(prompt_dir) if include_files else []
+            gpt_models = self._list_files(gpt_weights_dir, {".ckpt"}) if include_files else []
+            sovits_models = self._list_files(sovits_weights_dir, {".pth"}) if include_files else []
             workspaces.append(
                 {
-                    "role_name": role_name,
-                    "world_name": world_name,
-                    "base_version": base_version,
+                    "role_name": workspace_role,
+                    "world_name": workspace_world,
+                    "base_version": workspace_version,
                     "experiment_name": None,
                     "role_root": str(role_model_root),
                     "model_root": str(role_model_root),

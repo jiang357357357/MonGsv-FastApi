@@ -18,6 +18,18 @@ MIN_SPEECH_DURATION_MS = 250
 MIN_FINAL_BYTES = 3200
 LOW_VOLUME_LEVEL = 0.015
 CLIPPING_LEVEL = 0.98
+ASR_MODEL_CAPABILITIES = {
+    "funasr": {
+        "languages": {"zh", "yue"},
+        "sizes": {"large"},
+        "precisions": {"float32"},
+    },
+    "faster_whisper": {
+        "languages": {"auto", "en", "ja", "ko", "zh", "yue"},
+        "sizes": {"medium", "medium.en", "large-v2", "large-v3", "large-v3-turbo"},
+        "precisions": {"float32", "float16", "int8"},
+    },
+}
 
 
 class ASRFinalWebSocketHandler:
@@ -48,6 +60,10 @@ class ASRFinalWebSocketHandler:
         self.last_endpoint_silence_ms = 0
         self.expected_speaker_id = ""
         self.missing_speaker_warned = False
+        self.language = "zh"
+        self.model_type = "funasr"
+        self.model_size = "large"
+        self.precision = "float32"
         self._reset_vad_config()
 
     def _reset_vad_config(self):
@@ -87,6 +103,29 @@ class ASRFinalWebSocketHandler:
         self.vad_chunk_bytes = self._ms_to_pcm_bytes(self.vad_chunk_ms)
         self.preroll_bytes = self._ms_to_pcm_bytes(self.preroll_ms)
         self.end_silence_chunks = math.ceil(self.end_silence_ms / self.vad_chunk_ms)
+
+    def _apply_asr_config(self, data: dict):
+        language = str(data.get("language") or "zh").strip().lower()
+        model_type = str(data.get("model_type") or "funasr").strip().lower()
+        capability = ASR_MODEL_CAPABILITIES.get(model_type)
+        if not capability:
+            raise ValueError(f"不支持的 ASR 模型类型: {model_type}")
+
+        default_size = "large" if model_type == "funasr" else "large-v3"
+        default_precision = "float32" if model_type == "funasr" else "float16"
+        model_size = str(data.get("model_size") or default_size).strip()
+        precision = str(data.get("precision") or default_precision).strip().lower()
+        if language not in capability["languages"]:
+            raise ValueError(f"{model_type} 不支持语言: {language}")
+        if model_size not in capability["sizes"]:
+            raise ValueError(f"{model_type} 不支持模型规格: {model_size}")
+        if precision not in capability["precisions"]:
+            raise ValueError(f"{model_type} 不支持推理精度: {precision}")
+
+        self.language = language
+        self.model_type = model_type
+        self.model_size = model_size
+        self.precision = precision
 
     def _vad_config_payload(self):
         return {
@@ -179,14 +218,28 @@ class ASRFinalWebSocketHandler:
             self.expected_speaker_id = speaker_id_from_start(data)
         self._reset_vad_config()
         self._apply_vad_config(data)
+        try:
+            self._apply_asr_config(data)
+        except ValueError as exc:
+            await self._send_warning(websocket, "ASR_CONFIG_UNSUPPORTED", str(exc))
+            return
         if self.require_speaker_gate and not self.expected_speaker_id:
             await self._send_warning(websocket, "VOICEPRINT_REQUIRED", "start 指令必须包含当前用户 speaker_id")
             return
-        print(f"[WS-ASR-FINAL] VAD配置: {self._vad_config_payload()}")
+        print(
+            f"[WS-ASR-FINAL] ASR配置: {self.model_type}/{self.model_size}/"
+            f"{self.precision}/{self.language}; VAD配置: {self._vad_config_payload()}"
+        )
         status_payload = {
             "type": "status",
             "message": "开始录音",
             "vad": self._vad_config_payload(),
+            "asr": {
+                "language": self.language,
+                "model_type": self.model_type,
+                "model_size": self.model_size,
+                "precision": self.precision,
+            },
         }
         if self.require_speaker_gate:
             status_payload["speaker_id"] = self.expected_speaker_id
@@ -346,7 +399,15 @@ class ASRFinalWebSocketHandler:
             speaker_info = speaker_decision.speaker_info or {}
 
         from asgiref.sync import sync_to_async
-        result = await sync_to_async(voice_service.asr.transcribe_array)(speech_float, self.sample_rate)
+        engine = voice_service.asr.select_engine(self.language, self.model_type)
+        result = await sync_to_async(voice_service.asr.transcribe_array)(
+            speech_float,
+            self.sample_rate,
+            self.language,
+            engine,
+            self.model_size,
+            self.precision,
+        )
         text = result.get("text", "").strip()
         if self._should_punctuate(text):
             punctuated = await sync_to_async(voice_service.asr.punctuate)(text)
