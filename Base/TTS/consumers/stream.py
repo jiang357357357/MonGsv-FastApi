@@ -68,6 +68,7 @@ class TTSStreamWebSocketHandler:
             "request_id": context.request_id,
             "format": "pcm_s16le",
             "channels": 1,
+            "stream_mode": "segments" if self.inference_service.model_version in {"v3", "v4", "v5dev", "v5turbo"} else "tokens",
         })
 
     def _build_context(self, message: dict[str, Any]) -> TTSRequestContext:
@@ -137,7 +138,8 @@ class TTSStreamWebSocketHandler:
                 top_p=float(message.get("top_p") or 1.0),
                 temperature=float(message.get("temperature") or 1.0),
                 speed=float(message.get("speed") or 1.0),
-                sample_steps=int(message.get("sample_steps") or 32),
+                sample_steps=message.get("sample_steps"),
+                cfg_rate=message.get("cfg_rate"),
                 if_sr=self._bool_value(message.get("if_sr"), False),
                 ref_free=self._bool_value(message.get("ref_free"), False),
                 if_freeze=self._bool_value(message.get("if_freeze"), False),

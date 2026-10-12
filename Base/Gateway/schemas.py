@@ -62,7 +62,8 @@ class RoleEmotionSynthesisRequest(BaseModel):
     top_p: float = 1.0
     temperature: float = 1.0
     speed: float = 1.0
-    sample_steps: int = 32
+    sample_steps: Optional[int] = None
+    cfg_rate: Optional[float] = None
     if_sr: bool = False
     ref_free: bool = False
     if_freeze: bool = False

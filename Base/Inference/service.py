@@ -49,12 +49,14 @@ class InferenceConfig(BaseModel):
     seed: int = Field(default=-1, description="随机种子，-1 为随机")
     parallel_infer: bool = Field(default=True, description="是否并行推理")
     repetition_penalty: float = Field(default=1.35, description="重复惩罚")
-    sample_steps: int = Field(default=32, description="采样步数")
+    sample_steps: Optional[int] = Field(default=None, ge=1, description="采样步数；不传时使用模型默认值")
+    cfg_rate: Optional[float] = Field(default=None, ge=0, description="V5 CFG 系数；不传时使用模型默认值")
     batch_threshold: float = Field(default=0.75, description="分桶阈值")
     super_sampling: bool = Field(default=False, description="是否启用超分")
     streaming_mode: bool = Field(default=False, description="是否流式推理")
     return_fragment: bool = Field(default=False, description="是否返回分段音频")
     use_cuda_graph: bool = Field(default=False, description="是否尝试使用 CUDA Graph 加速普通推理")
+    use_flash_attention: bool = Field(default=False, description="是否尝试使用可用的 FlashAttention 加速")
     cuda_graph_mode: str = Field(default="graph", description="CUDA Graph模式")
 
 
@@ -199,7 +201,7 @@ class InferenceService:
 
     def _build_tts_config(self, gpt_path: str, sovits_path: str):
         """构建官方 TTS 配置对象。"""
-        version, _, _ = self._detect_sovits_version(sovits_path)
+        _, version, _ = self._detect_sovits_version(sovits_path)
         config_path = self._runtime_tts_config_path()
         tts_config = self._TTS_Config(config_path)
         tts_config.device = str(self.device)
@@ -271,6 +273,10 @@ class InferenceService:
 
     def _cleanup_runtime(self):
         """清理运行时对象。"""
+        accel = getattr(self.tts_pipeline, "t2s_accel", None)
+        if accel is not None:
+            accel.close()
+            self.tts_pipeline.t2s_accel = None
         if self.tts_pipeline is not None and hasattr(self.tts_pipeline, "stop"):
             try:
                 self.tts_pipeline.stop()
@@ -428,11 +434,12 @@ class InferenceService:
             "seed": int(request.config.seed),
             "parallel_infer": request.config.parallel_infer,
             "repetition_penalty": float(request.config.repetition_penalty),
-            "sample_steps": int(request.config.sample_steps),
+            "sample_steps": request.config.sample_steps,
+            "cfg_rate": request.config.cfg_rate,
             "super_sampling": request.config.if_sr or request.config.super_sampling,
             "streaming_mode": request.config.streaming_mode,
             "use_cuda_graph": request.config.use_cuda_graph,
-            "cuda_graph_mode": request.config.cuda_graph_mode,
+            "use_flash_attention": request.config.use_flash_attention,
         }
 
     def _run_tts(self, inputs: Dict[str, Any]) -> tuple[int, np.ndarray]:
@@ -487,7 +494,12 @@ class InferenceService:
             stream_request.config.parallel_infer = False
             stream_request.config.split_bucket = False
             stream_request.config.use_cuda_graph = False
+            stream_request.config.use_flash_attention = False
             stream_request.config.cuda_graph_mode = "graph"
+            accel = getattr(self.tts_pipeline, "t2s_accel", None)
+            if accel is not None:
+                accel.close()
+                self.tts_pipeline.t2s_accel = None
             inputs = self._build_tts_inputs(stream_request, temp_audio_path)
 
             emitted = False

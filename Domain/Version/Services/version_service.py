@@ -13,7 +13,7 @@ from Code.FastApi.Domain.Version.Models.responses import DirectoryVersionRespons
 class VersionService:
     """Resolve available GPT-SoVITS versions."""
 
-    ENUM_VERSIONS = ["v1", "v2", "v3", "v4", "v2Pro", "v2ProPlus"]
+    ENUM_VERSIONS = ["v1", "v2", "v3", "v4", "v2Pro", "v2ProPlus", "v5dev", "v5turbo"]
 
     def __init__(self):
         self._config = MonConfig(start_path=Path(__file__).resolve())

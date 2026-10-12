@@ -151,6 +151,8 @@ class SoVITSTrainingService:
     def _resolve_pretrained_s2_paths(self, version: str, pretrained_s2G: str, pretrained_s2D: str) -> tuple[str, str]:
         """解析 SoVITS 预训练底模路径，默认与官方 WebUI 保持一致。"""
         default_paths = {
+            "v5dev": (os.path.join("GPT_SoVITS", "pretrained_models", "gsv-v5-pretrained", "s2Gv5dev.pth"), ""),
+            "v5turbo": (os.path.join("GPT_SoVITS", "pretrained_models", "gsv-v5-pretrained", "s2Gv5turbo.pth"), ""),
             "v1": (
                 os.path.join("GPT_SoVITS", "pretrained_models", "s2G488k.pth"),
                 os.path.join("GPT_SoVITS", "pretrained_models", "s2D488k.pth"),
@@ -176,9 +178,11 @@ class SoVITSTrainingService:
                 os.path.join("GPT_SoVITS", "pretrained_models", "gsv-v4-pretrained", "s2Dv4.pth"),
             ),
         }
-        default_g, default_d = default_paths.get(version, default_paths["v2Pro"])
+        if version not in default_paths:
+            raise ValueError(f"不支持的模型版本: {version}")
+        default_g, default_d = default_paths[version]
         resolved_g = pretrained_s2G.strip() if pretrained_s2G and pretrained_s2G.strip() else os.path.join(self.gpt_sovits_root, default_g)
-        resolved_d = pretrained_s2D.strip() if pretrained_s2D and pretrained_s2D.strip() else os.path.join(self.gpt_sovits_root, default_d)
+        resolved_d = pretrained_s2D.strip() if pretrained_s2D and pretrained_s2D.strip() else (os.path.join(self.gpt_sovits_root, default_d) if default_d else "")
         return resolved_g, resolved_d
     
     def _create_config_file(self, request: SoVITSTrainingRequest, s2_dir: str) -> str:
@@ -581,7 +585,7 @@ class SoVITSTrainingService:
         Returns:
             List[str]: 支持的版本列表
         """
-        return ["v1", "v2", "v3", "v4", "v2Pro", "v2ProPlus"]
+        return ["v1", "v2", "v3", "v4", "v2Pro", "v2ProPlus", "v5dev", "v5turbo"]
     
     def validate_config(self, config: SoVITSTrainingConfig) -> Dict[str, Any]:
         """

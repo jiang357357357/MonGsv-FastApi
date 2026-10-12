@@ -28,7 +28,7 @@ try:
     
     # 动态导入模型（根据版本）
     def import_model_class(version: str):
-        if version in ["v3", "v4"]:
+        if version in ["v3", "v4", "v5dev", "v5turbo"]:
             from module.models import SynthesizerTrnV3 as SynthesizerTrn
         else:
             from module.models import SynthesizerTrn
@@ -119,10 +119,14 @@ class SemanticEncodingService:
             "v2": "GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s2G2333k.pth",
             "v3": "GPT_SoVITS/pretrained_models/s2Gv3.pth",
             "v4": "GPT_SoVITS/pretrained_models/gsv-v4-pretrained/s2Gv4.pth",
+            "v5dev": "GPT_SoVITS/pretrained_models/gsv-v5-pretrained/s2Gv5dev.pth",
+            "v5turbo": "GPT_SoVITS/pretrained_models/gsv-v5-pretrained/s2Gv5turbo.pth",
             "v2Pro": "GPT_SoVITS/pretrained_models/v2Pro/s2Gv2Pro.pth",
             "v2ProPlus": "GPT_SoVITS/pretrained_models/v2Pro/s2Gv2ProPlus.pth",
         }
-        return self._resolve_runtime_path(default_map.get(version_key, default_map["v2Pro"]))
+        if version_key not in default_map:
+            raise ValueError(f"不支持的模型版本: {version_key}")
+        return self._resolve_runtime_path(default_map[version_key])
 
     def _resolve_default_s2config_path(self, version: Optional[str]) -> str:
         """按版本选择默认 SoVITS 配置文件。"""
@@ -160,26 +164,9 @@ class SemanticEncodingService:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"模型文件不存在: {model_path}")
             
-        size = os.path.getsize(model_path)
-        size_mb = size / (1024 * 1024)
-        
-        print(f"模型文件大小: {size_mb:.1f}MB")
-        
-        # 根据官方逻辑检测版本
-        if size < 82978 * 1024:  # < 81MB
-            version = "v1"
-        elif size < 100 * 1024 * 1024:  # < 100MB
-            version = "v2"
-        elif size < 103520 * 1024:  # < 101MB
-            version = "v1"
-        elif size < 700 * 1024 * 1024:  # < 700MB
-            version = "v2"
-        else:  # >= 700MB
-            version = "v3"
-            
-        print(f"自动检测模型版本: {version}")
-        return version
-    
+        from process_ckpt import get_sovits_version_from_path_fast
+        return get_sovits_version_from_path_fast(model_path)[1]
+
     def _setup_device(self, config: SemanticEncodingConfig) -> str:
         """设置计算设备"""
         if config.device == "auto":
@@ -252,7 +239,8 @@ class SemanticEncodingService:
         
         # 加载预训练权重
         print(f"加载预训练模型: {config.pretrained_s2G}")
-        checkpoint = torch.load(config.pretrained_s2G, map_location="cpu", weights_only=False)
+        from process_ckpt import load_sovits_new
+        checkpoint = load_sovits_new(config.pretrained_s2G)
         
         # 处理不同的权重格式
         if "weight" in checkpoint:

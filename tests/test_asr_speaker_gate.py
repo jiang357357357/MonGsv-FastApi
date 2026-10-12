@@ -29,7 +29,10 @@ class FakeASR:
     def __init__(self):
         self.transcribe_calls = 0
 
-    def transcribe_array(self, audio, sample_rate):
+    def select_engine(self, language, model_type):
+        return "classic"
+
+    def transcribe_array(self, audio, sample_rate, *args, **kwargs):
         self.transcribe_calls += 1
         return {"text": "验证通过。"}
 

@@ -286,6 +286,12 @@ class ModelManager:
         Returns:
             str: 模型版本
         """
+        if os.path.isfile(sovits_path):
+            from Code.FastApi.Base.gpt_sovits_env import setup_gpt_sovits_paths
+            setup_gpt_sovits_paths(Path(__file__).resolve().parent)
+            from process_ckpt import get_sovits_version_from_path_fast
+            return get_sovits_version_from_path_fast(sovits_path)[1]
+
         filename = os.path.basename(sovits_path).lower()
         
         if "v2proplus" in filename:
