@@ -47,7 +47,7 @@ class SemanticEncodingConfig:
     s2config_path: str = ""  # 模型配置文件路径，为空时根据版本自动推导
     
     # 版本配置（自动检测或手动指定）
-    version: Optional[str] = None  # v1, v2, v3, v4, v2Pro, v2ProPlus, None=自动检测
+    version: Optional[str] = None  # v1, v2, v3, v4, v2Pro, v2ProPlus, v5dev, v5turbo, None=自动检测
     
     # 处理配置
     is_half: bool = True  # 是否使用半精度
@@ -153,7 +153,7 @@ class SemanticEncodingService:
         
     def _detect_model_version(self, model_path: str) -> str:
         """
-        根据模型文件大小自动检测版本
+        根据官方文件头或预训练权重哈希检测版本
         
         Args:
             model_path: 模型文件路径

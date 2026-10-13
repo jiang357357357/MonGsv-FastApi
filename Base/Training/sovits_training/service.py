@@ -49,7 +49,7 @@ class SoVITSTrainingConfig(BaseModel):
     
     # 高级选项
     if_grad_ckpt: bool = Field(default=False, description="是否开启梯度检查点节省显存")
-    lora_rank: int = Field(default=32, description="LoRA秩(仅v3/v4)")
+    lora_rank: int = Field(default=32, description="LoRA秩(仅v3/v4/v5dev/v5turbo)")
     fp16_run: bool = Field(default=True, description="是否使用半精度训练")
     
     # 损失权重
