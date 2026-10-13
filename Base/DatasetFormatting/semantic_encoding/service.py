@@ -241,6 +241,15 @@ class SemanticEncodingService:
         print(f"加载预训练模型: {config.pretrained_s2G}")
         from process_ckpt import load_sovits_new
         checkpoint = load_sovits_new(config.pretrained_s2G)
+
+        # LoRA exports omit frozen encoder parameters. Semantic extraction
+        # needs the original encoder, then any exported updates on top.
+        if checkpoint.get("lora_rank"):
+            base_path = self._resolve_default_pretrained_s2g(self.version)
+            if not os.path.isfile(base_path):
+                raise FileNotFoundError(f"LoRA 语义编码缺少对应底模: {base_path}")
+            base_checkpoint = load_sovits_new(base_path)
+            self.vq_model.load_state_dict(base_checkpoint["weight"], strict=False)
         
         # 处理不同的权重格式
         if "weight" in checkpoint:
