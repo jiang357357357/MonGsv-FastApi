@@ -1561,6 +1561,7 @@ async def _launch_training_target(
             lora_rank=options.lora_rank,
             if_grad_ckpt=options.grad_checkpoint,
             fp16_run=options.fp16,
+            log_interval=options.log_interval,
         ),
     )
     return service, await service.start_training(request)

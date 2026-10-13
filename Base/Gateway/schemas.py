@@ -49,6 +49,7 @@ class TrainingWorkflowOptions(BaseModel):
     sovits_learning_rate: float = Field(default=0.0001, gt=0, le=1)
     save_every_epoch: Optional[int] = Field(default=None, ge=1)
     lora_rank: int = Field(default=32, ge=1, le=256)
+    log_interval: int = Field(default=100, ge=1)
     grad_checkpoint: bool = False
     fp16: bool = True
 
@@ -66,6 +67,7 @@ class TrainingWorkbenchRequest(TrainingWorkflowOptions):
     model_config = ConfigDict(extra="forbid")
     save_every_epoch: int = Field(default=1, ge=1)
     grad_checkpoint: bool = True
+    log_interval: int = Field(default=10, ge=1)
     project_name: str
     world_name: str
     version: str

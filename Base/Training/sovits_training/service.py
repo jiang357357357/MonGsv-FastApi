@@ -29,6 +29,7 @@ class SoVITSTrainingConfig(BaseModel):
     version: str = Field(default="v2Pro", description="模型版本: v1, v2, v3, v4, v2Pro, v2ProPlus, v5dev, v5turbo")
     batch_size: int = Field(default=32, description="每张显卡的batch_size")
     total_epoch: int = Field(default=8, description="总训练轮数")
+    log_interval: int = Field(default=100, ge=1, description="每隔几步记录训练 Loss")
     save_every_epoch: int = Field(default=8, description="保存频率")
     
     # 学习率相关
@@ -220,6 +221,7 @@ class SoVITSTrainingService:
         data["train"]["if_save_every_weights"] = config.if_save_every_weights
         data["train"]["save_every_epoch"] = save_every_epoch
         data["train"]["gpu_numbers"] = config.gpu_numbers
+        data["train"]["log_interval"] = config.log_interval
         data["train"]["grad_ckpt"] = config.if_grad_ckpt
         data["train"]["lora_rank"] = config.lora_rank
         data["train"]["fp16_run"] = config.fp16_run

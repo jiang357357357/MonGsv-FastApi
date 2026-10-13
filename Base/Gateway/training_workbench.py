@@ -374,7 +374,8 @@ class TrainingWorkbench:
                 key=(result["project_root"],target["target"],log_file,target["status"])
                 cached=self.telemetry_cache.get(key)
                 if not cached or time.monotonic()-cached[0]>2:
-                    started=datetime.fromisoformat(result["created_at"]).timestamp()
+                    # Resume curves include the preceding steps from the same checkpoint history.
+                    started=datetime.fromisoformat(result["created_at"]).timestamp() if result["options"].get("training_mode") != "resume" else None
                     finished=datetime.fromisoformat(result["finished_at"]).timestamp() if result.get("finished_at") else None
                     values=read_telemetry(result["project_root"],target["target"],log_file,target["status"]=="completed",result["options"][target["target"]+"_total_epoch"],started,finished)
                     self.telemetry_cache[key]=(time.monotonic(),values)
