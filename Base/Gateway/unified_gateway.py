@@ -177,6 +177,7 @@ async def start_monhub_bridge():
 async def stop_monhub_bridge():
     """Unregister the gateway from MonHub on shutdown."""
     monhub_bridge.stop()
+    await training_workbench.shutdown()
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -1280,9 +1281,11 @@ async def _run_preprocessing_workflow(
     version: str,
     world_name: str = "Standalone",
     experiment_name: str = "",
+    layout_override: Optional[Dict[str, str]] = None,
+    progress_callback: Any = None,
 ) -> Dict[str, Any]:
     workflow_steps = []
-    layout = _resource_layout(
+    layout = layout_override or _resource_layout(
         project_name=project_name,
         version=version,
         world_name=world_name,
@@ -1305,9 +1308,13 @@ async def _run_preprocessing_workflow(
         output_dir=slice_output,
         config=SliceConfig(),
     )
+    if progress_callback:
+        progress_callback("audio_slice", "running")
     slice_result = await slice_service.process(slice_request)
     workflow_steps.append({"step": "audio_slice", "result": _to_payload(slice_result)})
     _require_step_success("audio_slice", slice_result)
+    if progress_callback:
+        progress_callback("audio_slice", "completed")
 
     copied_slice_files = _sync_directory_files(
         Path(slice_output),
@@ -1330,9 +1337,13 @@ async def _run_preprocessing_workflow(
         output_dir=asr_output_dir,
         config=_build_asr_config_for_language(language),
     )
+    if progress_callback:
+        progress_callback("asr_recognition", "running")
     asr_result = await asr_service.process(asr_request)
     workflow_steps.append({"step": "asr_recognition", "result": _to_payload(asr_result)})
     _require_step_success("asr_recognition", asr_result)
+    if progress_callback:
+        progress_callback("asr_recognition", "completed")
     if getattr(asr_result, "output_file", None):
         list_file = asr_result.output_file
     if not Path(list_file).exists():
@@ -1340,6 +1351,8 @@ async def _run_preprocessing_workflow(
 
     for task_name in ("text_processing", "audio_features", "semantic_encoding"):
         service = _require_workflow_service(task_name)
+        if progress_callback:
+            progress_callback(task_name, "running")
         result = await execute_format_task(
             task_name=task_name,
             service=service,
@@ -1351,6 +1364,8 @@ async def _run_preprocessing_workflow(
         )
         workflow_steps.append({"step": task_name, "result": _to_payload(result)})
         _require_step_success(task_name, result)
+        if progress_callback:
+            progress_callback(task_name, "completed")
 
     return {
         "project_name": project_name,
@@ -1378,10 +1393,12 @@ async def _run_formatting_only_workflow(
     version: str,
     world_name: str = "Standalone",
     experiment_name: str = "",
+    layout_override: Optional[Dict[str, str]] = None,
+    progress_callback: Any = None,
 ) -> Dict[str, Any]:
     """使用调用方提供的切分音频和标注文件，只执行训练集格式化。"""
     workflow_steps = []
-    layout = _resource_layout(
+    layout = layout_override or _resource_layout(
         project_name=project_name,
         version=version,
         world_name=world_name,
@@ -1421,6 +1438,8 @@ async def _run_formatting_only_workflow(
 
     for task_name in ("text_processing", "audio_features", "semantic_encoding"):
         service = _require_workflow_service(task_name)
+        if progress_callback:
+            progress_callback(task_name, "running")
         result = await execute_format_task(
             task_name=task_name,
             service=service,
@@ -1432,6 +1451,8 @@ async def _run_formatting_only_workflow(
         )
         workflow_steps.append({"step": task_name, "result": _to_payload(result)})
         _require_step_success(task_name, result)
+        if progress_callback:
+            progress_callback(task_name, "completed")
 
     return {
         "project_name": project_name,
@@ -1513,7 +1534,11 @@ async def _launch_training_target(
                 version=version,
                 batch_size=options.gpt_batch_size,
                 total_epoch=options.gpt_total_epoch,
-                save_every_epoch=options.gpt_total_epoch,
+                save_every_epoch=options.save_every_epoch or options.gpt_total_epoch,
+                learning_rate=options.gpt_learning_rate,
+                gpu_numbers=options.gpu_numbers,
+                num_workers=0,
+                precision="16-mixed" if options.fp16 else "32",
             ),
         )
         return service, await service.start_training(request)
@@ -1530,7 +1555,12 @@ async def _launch_training_target(
             version=version,
             batch_size=options.sovits_batch_size,
             total_epoch=options.sovits_total_epoch,
-            save_every_epoch=options.sovits_total_epoch,
+            save_every_epoch=options.save_every_epoch or options.sovits_total_epoch,
+            learning_rate=options.sovits_learning_rate,
+            gpu_numbers=options.gpu_numbers,
+            lora_rank=options.lora_rank,
+            if_grad_ckpt=options.grad_checkpoint,
+            fp16_run=options.fp16,
         ),
     )
     return service, await service.start_training(request)
@@ -2228,6 +2258,12 @@ async def asr_transcribe(
         for p in cleanup_paths:
             if os.path.exists(p):
                 os.unlink(p)
+
+
+from Code.FastApi.Base.Gateway.training_workbench import TrainingWorkbench
+
+training_workbench = TrainingWorkbench(sys.modules[__name__])
+app.include_router(training_workbench.router)
 
 
 if __name__ == "__main__":
