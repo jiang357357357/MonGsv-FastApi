@@ -361,6 +361,7 @@ class TrainingWorkbench:
 
     def snapshot(self, record: dict, telemetry: bool = True) -> dict:
         result = json.loads(json.dumps(record,default=str))
+        self.refresh_emotions(result)
         for target in result["targets"]:
             if not target.get("launch"):
                 continue
@@ -381,6 +382,19 @@ class TrainingWorkbench:
                     self.telemetry_cache[key]=(time.monotonic(),values)
                 target["telemetry"]=self.telemetry_cache[key][1]
         return result
+
+    @staticmethod
+    def refresh_emotions(record: dict) -> None:
+        if not record.get("preview") or not record.get("model_root"):
+            return
+        emotions=[]
+        directory=Path(record["model_root"])/"emotion"
+        for file in sorted(directory.glob("*")):
+            match=re.match(r"\[([^]]+)\]\[([^]]+)\](.*)",file.stem)
+            if file.is_file() and file.suffix.lower() in {".wav",".mp3",".flac",".m4a",".ogg"} and match:
+                emotions.append({"name":match[1],"language":match[2],"text":match[3],"path":str(file)})
+        if directory.is_dir():
+            record["preview"]["emotions"]=emotions
 
     async def history(self) -> dict:
         return {"runs":[self.snapshot(record,False) for record in sorted(self.runs.values(),key=lambda r:r["created_at"],reverse=True)[:100]]}
@@ -427,6 +441,7 @@ class TrainingWorkbench:
         record=self.require(workflow_id)
         if record["status"] != "completed" or not record.get("preview"):
             raise HTTPException(400,"请先完成训练")
+        self.refresh_emotions(record)
         emotion=next((e for e in record["preview"]["emotions"] if e["name"]==payload.emotion),None)
         if not emotion:
             raise HTTPException(400,"请选择可用的参考情绪")
