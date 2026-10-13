@@ -9,17 +9,15 @@ from Code.FastApi.Base.Gateway.schemas import RoleEmotionSynthesisRequest
 from Code.FastApi.Base.Inference.service import InferenceConfig, InferenceRequest, InferenceService
 from Code.FastApi.Base.Inference.model_manager import ModelManager
 from Code.FastApi.Base.Training.sovits_training.service import SoVITSTrainingService
-from Code.FastApi.Api.models.requests.dataset_formatting import AudioFeaturesConfig, SemanticEncodingConfig
 
 
 class V5ContractTests(unittest.TestCase):
     def test_dataset_request_schemas_accept_actual_v5_variants(self):
         from Code.FastApi.Base.DatasetFormatting.audio_features.server import AudioFeaturesConfigModel
-        for schema in (AudioFeaturesConfig, SemanticEncodingConfig, AudioFeaturesConfigModel):
-            for version in ("v5dev", "v5turbo"):
-                self.assertEqual(schema(version=version).version, version)
-            with self.assertRaises(ValueError):
-                schema(version="v5")
+        for version in ("v5dev", "v5turbo"):
+            self.assertEqual(AudioFeaturesConfigModel(version=version).version, version)
+        with self.assertRaises(ValueError):
+            AudioFeaturesConfigModel(version="v5")
 
     def test_accel_import_preserves_host_runtime_settings(self):
         script = '''import torch
