@@ -1,9 +1,12 @@
 """Compatibility checks for V5 requests and exported LoRA checkpoint headers."""
 import tempfile
+import asyncio
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from Code.FastApi.Base.Gateway.schemas import RoleEmotionSynthesisRequest
 from Code.FastApi.Base.Inference.service import InferenceConfig, InferenceRequest, InferenceService
@@ -49,6 +52,32 @@ assert not torch.backends.cudnn.benchmark
         request = InferenceRequest(text=payload.text, config=InferenceConfig(sample_steps=payload.sample_steps, cfg_rate=payload.cfg_rate))
         inputs = object.__new__(InferenceService)._build_tts_inputs(request, "reference.wav")
         self.assertEqual((inputs["sample_steps"], inputs["cfg_rate"]), (8, 1.1))
+
+    def test_seed_accepts_random_or_uint32_and_rejects_invalid_values(self):
+        for seed in (-1, 0, 2027, 4294967295):
+            payload = RoleEmotionSynthesisRequest(role_id=1, emotion="test", text="测试", seed=seed)
+            self.assertEqual(payload.seed, seed)
+        for seed in (-2, 4294967296, 1.5):
+            with self.assertRaises(ValueError):
+                RoleEmotionSynthesisRequest(role_id=1, emotion="test", text="测试", seed=seed)
+        self.assertEqual(RoleEmotionSynthesisRequest(role_id=1, emotion="test", text="测试").seed, -1)
+
+    def test_role_emotion_endpoint_forwards_seed_and_keeps_default_sampling(self):
+        from Code.FastApi.Base.Gateway import unified_gateway as gateway
+        role = SimpleNamespace(id=1, world_id=2, version="v5turbo", gpt_model_path="gpt.ckpt",
+                               sov_model_path="sovits.pth", prompt_text="参考", language="zh")
+        service = SimpleNamespace(inference=AsyncMock(return_value={"success": True}),
+            get_model_info=lambda: {"models_loaded": True, "gpt_path": "gpt.ckpt", "sovits_path": "sovits.pth"})
+        roles = SimpleNamespace(get_role=lambda _: role,
+            list_role_emotions=lambda _: [{"name": "日常", "music_url": "ref.wav", "text": "参考"}])
+        with patch.object(gateway, "_ensure_service", return_value=service), patch.object(gateway, "RoleService", return_value=roles):
+            asyncio.run(gateway.synthesize_role_emotion(
+                RoleEmotionSynthesisRequest(role_id=1, world_id=2, version="v5turbo", emotion="日常", text="试听", seed=2027)))
+        request = service.inference.call_args.args[0]
+        inputs = object.__new__(InferenceService)._build_tts_inputs(request, "ref.wav")
+        self.assertEqual(inputs["seed"], 2027)
+        self.assertIsNone(inputs["sample_steps"])
+        self.assertIsNone(inputs["cfg_rate"])
 
     def test_lora_version_comes_from_header_without_version_in_filename(self):
         with tempfile.TemporaryDirectory() as directory:
