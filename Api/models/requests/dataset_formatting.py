@@ -54,7 +54,7 @@ class AudioFeaturesConfig(BaseModel):
     
     @validator('version')
     def validate_version(cls, v):
-        allowed_versions = ['v1', 'v2', 'v3', 'v4', 'v2Pro', 'v2ProPlus']
+        allowed_versions = ['v1', 'v2', 'v3', 'v4', 'v2Pro', 'v2ProPlus', 'v5dev', 'v5turbo']
         if v not in allowed_versions:
             raise ValueError(f'version must be one of {allowed_versions}')
         return v
@@ -79,7 +79,7 @@ class SemanticEncodingConfig(BaseModel):
     
     @validator('version')
     def validate_version(cls, v):
-        allowed_versions = ['v1', 'v2', 'v3', 'v4', 'v2Pro', 'v2ProPlus']
+        allowed_versions = ['v1', 'v2', 'v3', 'v4', 'v2Pro', 'v2ProPlus', 'v5dev', 'v5turbo']
         if v not in allowed_versions:
             raise ValueError(f'version must be one of {allowed_versions}')
         return v

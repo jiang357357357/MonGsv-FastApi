@@ -26,7 +26,7 @@ class AudioFeaturesConfigModel(BaseModel):
         default="GPT_SoVITS/pretrained_models/sv/pretrained_eres2netv2w24s4ep4.ckpt",
         description="说话人模型路径"
     )
-    version: Literal["v1", "v2", "v2Pro", "v2ProPlus", "v3", "v4"] = Field(
+    version: Literal["v1", "v2", "v2Pro", "v2ProPlus", "v3", "v4", "v5dev", "v5turbo"] = Field(
         default="v2", 
         description="GPT-SoVITS版本"
     )

@@ -49,7 +49,7 @@ class AudioFeaturesConfig:
     sv_model_path: str = "GPT_SoVITS/pretrained_models/sv/pretrained_eres2netv2w24s4ep4.ckpt"
     
     # 版本配置
-    version: str = "v2"  # v1, v2, v2Pro, v2ProPlus, v3, v4
+    version: str = "v2"  # v1, v2, v2Pro, v2ProPlus, v3, v4, v5dev, v5turbo
     
     # 处理配置
     is_half: bool = True  # 是否使用半精度

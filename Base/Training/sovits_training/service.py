@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 class SoVITSTrainingConfig(BaseModel):
     """SoVITS训练配置参数"""
     # 基础训练参数
-    version: str = Field(default="v2Pro", description="模型版本: v1, v2, v3, v4, v2Pro, v2ProPlus")
+    version: str = Field(default="v2Pro", description="模型版本: v1, v2, v3, v4, v2Pro, v2ProPlus, v5dev, v5turbo")
     batch_size: int = Field(default=32, description="每张显卡的batch_size")
     total_epoch: int = Field(default=8, description="总训练轮数")
     save_every_epoch: int = Field(default=8, description="保存频率")
