@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from Code.FastApi.Base.Training.defaults import fill_training_defaults
 
 
 class LocalDialogRequest(BaseModel):
@@ -39,19 +41,21 @@ class TrainingWorkflowOptions(BaseModel):
     start_training: bool = False
     train_gpt: bool = True
     train_sovits: bool = True
-    gpt_batch_size: int = 8
+    gpt_batch_size: Optional[int] = Field(default=None, ge=1)
     gpt_total_epoch: int = 15
-    sovits_batch_size: int = 32
-    sovits_total_epoch: int = 8
+    sovits_batch_size: Optional[int] = Field(default=None, ge=1)
+    sovits_total_epoch: Optional[int] = Field(default=None, ge=1)
     training_order: str = "sovits_first"
     gpu_numbers: str = "0"
     gpt_learning_rate: float = Field(default=0.01, gt=0, le=1)
     sovits_learning_rate: float = Field(default=0.0001, gt=0, le=1)
-    save_every_epoch: Optional[int] = Field(default=None, ge=1)
+    save_every_epoch: Optional[int] = Field(default=None, ge=1, description="兼容旧请求；新任务只在最后一轮保存")
+    gpt_save_every_epoch: Optional[int] = Field(default=None, ge=1, description="自动跟随 GPT 总轮数")
+    sovits_save_every_epoch: Optional[int] = Field(default=None, ge=1, description="自动跟随 SoVITS 总轮数")
     lora_rank: int = Field(default=32, ge=1, le=256)
     log_interval: int = Field(default=100, ge=1)
     grad_checkpoint: bool = False
-    fp16: bool = True
+    fp16: Optional[bool] = None
 
     @field_validator("gpu_numbers")
     @classmethod
@@ -65,9 +69,6 @@ class TrainingWorkflowOptions(BaseModel):
 
 class TrainingWorkbenchRequest(TrainingWorkflowOptions):
     model_config = ConfigDict(extra="forbid")
-    save_every_epoch: int = Field(default=1, ge=1)
-    grad_checkpoint: bool = True
-    log_interval: int = Field(default=10, ge=1)
     project_name: str
     world_name: str
     version: str
@@ -82,10 +83,17 @@ class TrainingWorkbenchRequest(TrainingWorkflowOptions):
     resume_workspace: str = ""
     publish_models: bool = True
 
+    @model_validator(mode="after")
+    def official_defaults(self):
+        resolved = fill_training_defaults(self, self.version)
+        for key, value in resolved.__dict__.items():
+            object.__setattr__(self, key, value)
+        return self
+
     @field_validator("gpt_batch_size", "sovits_batch_size", "gpt_total_epoch", "sovits_total_epoch")
     @classmethod
     def positive_training_parameters(cls, value: int) -> int:
-        if value < 1:
+        if value is not None and value < 1:
             raise ValueError("Batch 和训练轮数必须至少为 1")
         return value
 
@@ -137,16 +145,16 @@ class RoleEmotionSynthesisRequest(BaseModel):
     world_id: Optional[int] = None
     version: Optional[str] = None
     how_to_cut: str = "按标点符号切"
-    top_k: int = 15
-    top_p: float = 1.0
-    temperature: float = 1.0
+    top_k: int = Field(default=15, ge=1, le=100)
+    top_p: float = Field(default=1.0, ge=0, le=1)
+    temperature: float = Field(default=1.0, ge=0, le=1)
     speed: float = 1.0
     seed: int = Field(default=-1, ge=-1, le=4294967295)
-    sample_steps: Optional[int] = None
-    cfg_rate: Optional[float] = None
+    sample_steps: Optional[Literal[4, 8, 16, 32]] = None
+    cfg_rate: Optional[float] = Field(default=None, ge=0, le=2)
     if_sr: bool = False
     ref_free: bool = False
     if_freeze: bool = False
-    pause_second: float = 0.3
+    pause_second: float = Field(default=0.3, ge=0.1, le=0.5)
     inference_mode: str = "normal"
     return_base64: bool = True

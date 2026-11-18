@@ -17,7 +17,7 @@ import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import numpy as np
 import soundfile as sf
@@ -31,13 +31,15 @@ from .residency import ModelResidencyManager, ResidencyConfig
 class InferenceConfig(BaseModel):
     """推理配置参数。"""
 
-    top_k: int = Field(default=15, description="Top-K 采样参数")
-    top_p: float = Field(default=1.0, description="Top-P 采样参数")
-    temperature: float = Field(default=1.0, description="温度参数")
+    top_k: int = Field(default=15, ge=1, le=100, description="Top-K 采样参数")
+    top_p: float = Field(default=1.0, ge=0, le=1, description="Top-P 采样参数")
+    temperature: float = Field(default=1.0, ge=0, le=1, description="温度参数")
     how_to_cut: str = Field(default="按标点符号切", description="文本切分方式")
     speed: float = Field(default=1.0, description="语速调节")
     pause_second: Optional[float] = Field(
         default=None,
+        ge=0.1,
+        le=0.5,
         description="句间停顿时长(秒)；提供时优先于 fragment_interval",
     )
     ref_free: bool = Field(default=False, description="是否启用无参考模式")
@@ -49,8 +51,8 @@ class InferenceConfig(BaseModel):
     seed: int = Field(default=-1, description="随机种子，-1 为随机")
     parallel_infer: bool = Field(default=True, description="是否并行推理")
     repetition_penalty: float = Field(default=1.35, description="重复惩罚")
-    sample_steps: Optional[int] = Field(default=None, ge=1, description="采样步数；不传时使用模型默认值")
-    cfg_rate: Optional[float] = Field(default=None, ge=0, description="V5 CFG 系数；不传时使用模型默认值")
+    sample_steps: Optional[Literal[4, 8, 16, 32]] = Field(default=None, description="采样步数；不传时使用官方 WebUI 默认值")
+    cfg_rate: Optional[float] = Field(default=None, ge=0, le=2, description="V5 CFG 系数；不传时使用模型默认值")
     batch_threshold: float = Field(default=0.75, description="分桶阈值")
     super_sampling: bool = Field(default=False, description="是否启用超分")
     streaming_mode: bool = Field(default=False, description="是否流式推理")
@@ -413,6 +415,13 @@ class InferenceService:
             if request.config.pause_second is not None
             else request.config.fragment_interval
         )
+        sample_steps = request.config.sample_steps
+        version = getattr(self, "model_version", None)
+        if version is None:
+            version = getattr(getattr(getattr(self, "tts_pipeline", None), "configs", None), "version", None)
+        # The official WebUI selects 8 for V4; TTS.run otherwise falls back to 32.
+        if sample_steps is None and version == "v4":
+            sample_steps = 8
 
         return {
             "text": request.text,
@@ -434,7 +443,7 @@ class InferenceService:
             "seed": int(request.config.seed),
             "parallel_infer": request.config.parallel_infer,
             "repetition_penalty": float(request.config.repetition_penalty),
-            "sample_steps": request.config.sample_steps,
+            "sample_steps": sample_steps,
             "cfg_rate": request.config.cfg_rate,
             "super_sampling": request.config.if_sr or request.config.super_sampling,
             "streaming_mode": request.config.streaming_mode,

@@ -175,9 +175,9 @@ class PunctuationEngine:
         return text
 
 
-class LegacyFunasrEngine:
+class FunASREngine:
     def __init__(self):
-        print("[ASR] 加载传统 Paraformer-large 引擎...")
+        print("[ASR] 初始化 Fun-ASR-Nano 引擎（粤语使用 UniASR）...")
         root = self._find_root()
         if root:
             sys.path.insert(0, root)
@@ -186,7 +186,7 @@ class LegacyFunasrEngine:
         self._transcribe_with_model = transcribe_with_model
         self._recognize_with_model = recognize_with_model
         self._model_cache: dict = {}
-        print("[ASR] 传统引擎就绪")
+        print("[ASR] Fun-ASR-Nano 引擎就绪")
 
     def _find_root(self) -> Optional[str]:
         for parent in Path(__file__).resolve().parents:
@@ -196,7 +196,8 @@ class LegacyFunasrEngine:
 
     def _get_model(self, language: str):
         if language not in self._model_cache:
-            self._model_cache[language] = self._create_model(language, use_cache=False)
+            backend = "classic" if language == "yue" else "fun-asr-nano"
+            self._model_cache[language] = self._create_model(language, use_cache=False, backend=backend)
         return self._model_cache[language]
 
     def transcribe(self, audio_path: str, language: str = "zh") -> dict:
@@ -205,7 +206,7 @@ class LegacyFunasrEngine:
             text = self._transcribe_with_model(model, audio_path)
             return {"text": text}
         except Exception as e:
-            print(f"[ASR] 传统引擎识别失败: {e}")
+            print(f"[ASR] FunASR 引擎识别失败: {e}")
             return {"text": ""}
 
     def transcribe_array(self, audio_array: np.ndarray, sample_rate: int = 16000, language: str = "zh") -> dict:
@@ -302,7 +303,7 @@ class ASRManager:
     def __init__(self, engine: str = ENGINE_FUNASR):
         self._engine_type = engine
         self._streaming: Optional[StreamingParaformerEngine] = None
-        self._funasr: Optional[LegacyFunasrEngine] = None
+        self._funasr: Optional[FunASREngine] = None
         self._whisper: Optional[FasterWhisperEngine] = None
         self._punctuation: Optional[PunctuationEngine] = None
 
@@ -313,9 +314,9 @@ class ASRManager:
         return self._streaming
 
     @property
-    def funasr(self) -> LegacyFunasrEngine:
+    def funasr(self) -> FunASREngine:
         if self._funasr is None:
-            self._funasr = LegacyFunasrEngine()
+            self._funasr = FunASREngine()
         return self._funasr
 
     @property

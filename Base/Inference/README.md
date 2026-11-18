@@ -214,15 +214,17 @@ asyncio.run(basic_inference())
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `top_k` | int | 15 | Top-K采样参数 |
-| `top_p` | float | 1.0 | Top-P采样参数 |
-| `temperature` | float | 1.0 | 温度参数，控制随机性 |
+| `top_k` | int | 15 | Top-K采样参数，范围 1–100 |
+| `top_p` | float | 1.0 | Top-P采样参数，范围 0–1 |
+| `temperature` | float | 1.0 | 温度参数，范围 0–1 |
 | `how_to_cut` | str | "不切" | 文本切分方式 |
 | `speed` | float | 1.0 | 语速调节 |
-| `pause_second` | float | 0.3 | 句间停顿时长 |
+| `pause_second` | float | 0.3 | 句间停顿时长，范围 0.1–0.5 秒；省略时沿用 fragment_interval |
 | `ref_free` | bool | false | 无参考模式 |
 | `batch_size` | int | 1 | 批处理大小 |
 | `seed` | int | -1 | 随机种子 |
+| `sample_steps` | int | 按版本 | 可选 4、8、16、32；默认 V3 / V5 Dev 为 32，V4 为 8，V5 Turbo 为 4 |
+| `cfg_rate` | float | 按版本 | 范围 0–2；默认 V5 Dev 为 1.3，V5 Turbo 为 0 |
 
 ### 文本切分方式
 

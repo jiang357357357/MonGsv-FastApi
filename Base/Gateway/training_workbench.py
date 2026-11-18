@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from Code.FastApi.Base.Gateway.resources import normalize_path_segment, resource_layout, resources_root
 from Code.FastApi.Base.Gateway.schemas import TrainingWorkbenchRequest
 from Code.FastApi.Base.Training.telemetry import log_tail, read_telemetry
+from Code.FastApi.Base.Training.defaults import SOURCE_URL, VERSIONS, training_defaults
 
 STAGES = ("audio_slice", "asr_recognition", "text_processing", "audio_features", "semantic_encoding")
 FEATURES = ("2-name2text.txt", "3-bert", "4-cnhubert", "5-wav32k", "6-name2semantic.tsv", "7-sv_cn")
@@ -78,12 +79,16 @@ class TrainingWorkbench:
                 continue
         self.router = APIRouter(prefix="/training/workbench", tags=["training-workbench"], dependencies=[Depends(gateway.get_current_user)])
         self.router.add_api_route("/start", self.start, methods=["POST"])
+        self.router.add_api_route("/defaults", self.defaults, methods=["GET"])
         self.router.add_api_route("/workspaces", self.workspaces, methods=["GET"])
         self.router.add_api_route("/runs", self.history, methods=["GET"])
         self.router.add_api_route("/runs/{workflow_id}", self.status, methods=["GET"])
         self.router.add_api_route("/runs/{workflow_id}/stop", self.stop, methods=["POST"])
         self.router.add_api_route("/runs/{workflow_id}/logs", self.logs, methods=["GET"])
         self.router.add_api_route("/runs/{workflow_id}/preview", self.preview, methods=["POST"])
+
+    async def defaults(self) -> dict:
+        return {"source": SOURCE_URL, "save_policy": "final_only", "versions": {version: training_defaults(version) for version in VERSIONS}}
 
     def save(self, record: dict) -> None:
         record["updated_at"] = datetime.now().isoformat()

@@ -520,6 +520,25 @@ async def asr_recognize(
                 pass
 
 
+def _resolve_reference_audio_path(path: str, purpose: str = "参考音频") -> Path:
+    """Use the same resource boundary for reference playback and transcription."""
+    resources_root = _resources_root()
+    workspace_root = MonConfig(start_path=Path(__file__).resolve()).workspace_root() or Path.cwd()
+    allowed_roots = [
+        (resources_root / "Model").resolve(),
+        (resources_root / "Train" / "Projects").resolve(),
+        (workspace_root / "music").resolve(),
+    ]
+    target_path = Path(path).expanduser().resolve()
+    if not target_path.is_file():
+        raise HTTPException(status_code=404, detail=f"{purpose}不存在")
+    if target_path.suffix.lower() not in {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}:
+        raise HTTPException(status_code=400, detail=f"{purpose}格式不受支持")
+    if not any(root in target_path.parents for root in allowed_roots):
+        raise HTTPException(status_code=400, detail=f"{purpose}路径不在允许的资源目录范围内")
+    return target_path
+
+
 async def _inference_transcribe(
     audio_file: UploadFile | None,
     audio_path: str,
@@ -549,19 +568,7 @@ async def _inference_transcribe(
                 temp_file.write(await audio_file.read())
             input_path = upload_path
         elif audio_path.strip():
-            resources_root = _resources_root()
-            model_root = (resources_root / "Model").resolve()
-            target_path = Path(audio_path).expanduser().resolve()
-            allowed_suffixes = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
-
-            if not target_path.exists() or not target_path.is_file():
-                raise HTTPException(status_code=404, detail="待转录音频不存在")
-            if target_path.suffix.lower() not in allowed_suffixes:
-                raise HTTPException(status_code=400, detail="待转录音频格式不受支持")
-            if not (target_path.parent == model_root or model_root in target_path.parents):
-                raise HTTPException(status_code=400, detail="待转录音频路径不在允许的资源目录范围内")
-
-            input_path = str(target_path)
+            input_path = str(_resolve_reference_audio_path(audio_path, "待转录音频"))
         else:
             raise HTTPException(status_code=400, detail="请上传音频文件或提供音频路径")
 
@@ -811,7 +818,7 @@ async def start_gpt_training(
     workspace_dir: str = Form(default=""),
     model_output_dir: str = Form(default=""),
     version: str = Form(default="v2Pro"),
-    batch_size: int = Form(default=8),
+    batch_size: Optional[int] = Form(default=None),
     total_epoch: int = Form(default=15),
     user: Any = Depends(get_current_user),
 ):
@@ -832,7 +839,6 @@ async def start_gpt_training(
                 version=version,
                 batch_size=batch_size,
                 total_epoch=total_epoch,
-                save_every_epoch=total_epoch,
             ),
         )
         return await service.start_training(request)
@@ -847,8 +853,8 @@ async def start_sovits_training(
     workspace_dir: str = Form(default=""),
     model_output_dir: str = Form(default=""),
     version: str = Form(default="v2Pro"),
-    batch_size: int = Form(default=32),
-    total_epoch: int = Form(default=8),
+    batch_size: Optional[int] = Form(default=None),
+    total_epoch: Optional[int] = Form(default=None),
     user: Any = Depends(get_current_user),
 ):
     """开始 SoVITS 训练。"""
@@ -868,7 +874,6 @@ async def start_sovits_training(
                 version=version,
                 batch_size=batch_size,
                 total_epoch=total_epoch,
-                save_every_epoch=total_epoch,
             ),
         )
         return await service.start_training(request)
@@ -1198,23 +1203,7 @@ async def get_reference_audio(
     user: Any = Depends(get_current_user),
 ):
     """安全返回资源目录中的参考音频，供前端试听。"""
-    resources_root = _resources_root()
-    model_root = (resources_root / "Model").resolve()
-    legacy_music_root = ((MonConfig(start_path=Path(__file__).resolve()).workspace_root() or Path.cwd()) / "music").resolve()
-    target_path = Path(path).expanduser().resolve()
-    allowed_suffixes = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
-
-    if not target_path.exists() or not target_path.is_file():
-        raise HTTPException(status_code=404, detail="参考音频不存在")
-    if target_path.suffix.lower() not in allowed_suffixes:
-        raise HTTPException(status_code=400, detail="参考音频格式不受支持")
-
-    allowed_roots = [model_root]
-    if legacy_music_root.exists():
-        allowed_roots.append(legacy_music_root)
-
-    if not any(root == target_path.parent or root in target_path.parents for root in allowed_roots):
-        raise HTTPException(status_code=400, detail="参考音频路径不在允许的资源目录范围内")
+    target_path = _resolve_reference_audio_path(path)
 
     media_type, _ = mimetypes.guess_type(str(target_path))
     return FileResponse(
@@ -1524,6 +1513,8 @@ async def _launch_training_target(
     sovits_model_dir: str,
 ) -> tuple[Any, Any]:
     """启动单个训练阶段并返回服务实例与启动结果。"""
+    from Code.FastApi.Base.Training.defaults import fill_training_defaults
+    options = fill_training_defaults(options, version)
     if target == "gpt":
         service = _ensure_service("gpt_training")
         from Code.FastApi.Base.Training.gpt_training.service import GPTTrainingRequest, GPTTrainingConfig
@@ -1537,7 +1528,7 @@ async def _launch_training_target(
                 version=version,
                 batch_size=options.gpt_batch_size,
                 total_epoch=options.gpt_total_epoch,
-                save_every_epoch=options.save_every_epoch or options.gpt_total_epoch,
+                save_every_epoch=options.gpt_save_every_epoch,
                 learning_rate=options.gpt_learning_rate,
                 gpu_numbers=options.gpu_numbers,
                 num_workers=0,
@@ -1558,7 +1549,7 @@ async def _launch_training_target(
             version=version,
             batch_size=options.sovits_batch_size,
             total_epoch=options.sovits_total_epoch,
-            save_every_epoch=options.save_every_epoch or options.sovits_total_epoch,
+            save_every_epoch=options.sovits_save_every_epoch,
             learning_rate=options.sovits_learning_rate,
             gpu_numbers=options.gpu_numbers,
             lora_rank=options.lora_rank,
@@ -1651,6 +1642,8 @@ async def _start_training_workflow(
     gpt_model_dir: str = "",
     sovits_model_dir: str = "",
 ) -> Dict[str, Any]:
+    from Code.FastApi.Base.Training.defaults import fill_training_defaults
+    options = fill_training_defaults(options, version)
     ordered_targets: List[str]
     if options.training_order == "gpt_first":
         ordered_targets = ["gpt", "sovits"]
@@ -1724,10 +1717,10 @@ async def complete_workflow(
     start_training: bool = Form(default=False),
     train_gpt: bool = Form(default=True),
     train_sovits: bool = Form(default=True),
-    gpt_batch_size: int = Form(default=8),
+    gpt_batch_size: Optional[int] = Form(default=None),
     gpt_total_epoch: int = Form(default=15),
-    sovits_batch_size: int = Form(default=32),
-    sovits_total_epoch: int = Form(default=8),
+    sovits_batch_size: Optional[int] = Form(default=None),
+    sovits_total_epoch: Optional[int] = Form(default=None),
     training_order: str = Form(default="sovits_first"),
     user: Any = Depends(get_current_user),
 ):
@@ -1799,10 +1792,10 @@ async def full_training_workflow(
     list_file: str = Form(default=""),
     train_gpt: bool = Form(default=True),
     train_sovits: bool = Form(default=True),
-    gpt_batch_size: int = Form(default=8),
+    gpt_batch_size: Optional[int] = Form(default=None),
     gpt_total_epoch: int = Form(default=15),
-    sovits_batch_size: int = Form(default=32),
-    sovits_total_epoch: int = Form(default=8),
+    sovits_batch_size: Optional[int] = Form(default=None),
+    sovits_total_epoch: Optional[int] = Form(default=None),
     training_order: str = Form(default="sovits_first"),
     audio_files: list[UploadFile] | None = File(default=None),
     user: Any = Depends(get_current_user),

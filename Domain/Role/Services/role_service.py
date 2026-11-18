@@ -60,6 +60,7 @@ class RoleService:
     def list_role_workspaces(
         self,
         *,
+        role_id: int | None = None,
         role_name: str | None = None,
         world_name: str | None = None,
         base_version: str | None = None,
@@ -73,6 +74,9 @@ class RoleService:
             if not role_model_root.is_dir():
                 continue
             workspace_world, workspace_role, workspace_version = role_model_root.parts[-3:]
+            workspace_role_id = self._role_id(workspace_world, workspace_role, workspace_version)
+            if role_id is not None and workspace_role_id != role_id:
+                continue
             if role_name and workspace_role != role_name:
                 continue
             if world_name and workspace_world != world_name:
@@ -83,17 +87,25 @@ class RoleService:
             model_sliced_dir = role_model_root / "sliced"
             raw_dir = train_root / "source" / "raw" if train_root else None
             prompt_dir = train_root / "source" / "prompt" if train_root else None
-            sliced_dir = train_root / "dataset" / "sliced" if train_root else None
+            sliced_dirs = self._training_sliced_directories(train_root)
+            sliced_dir = next((path for path in sliced_dirs if path.is_dir()), None)
             gpt_weights_dir = role_model_root / "GPT"
             sovits_weights_dir = role_model_root / "SoVITS"
-            model_sliced_files = self._list_files(model_sliced_dir) if include_files else []
-            sliced_files = self._list_files(sliced_dir) if include_files else []
+            model_sliced_files = self._list_files(model_sliced_dir, self.AUDIO_SUFFIXES) if include_files else []
+            sliced_files = []
+            if include_files:
+                for candidate in sliced_dirs:
+                    candidate_files = self._list_files(candidate, self.AUDIO_SUFFIXES)
+                    if candidate_files:
+                        sliced_dir, sliced_files = candidate, candidate_files
+                        break
             raw_files = self._list_files(raw_dir) if include_files else []
             prompt_files = self._list_files(prompt_dir) if include_files else []
             gpt_models = self._list_files(gpt_weights_dir, {".ckpt"}) if include_files else []
             sovits_models = self._list_files(sovits_weights_dir, {".pth"}) if include_files else []
             workspaces.append(
                 {
+                    "role_id": workspace_role_id,
                     "role_name": workspace_role,
                     "world_name": workspace_world,
                     "base_version": workspace_version,
@@ -743,8 +755,7 @@ class RoleService:
 
         source_path = Path(raw_path).expanduser().resolve()
         allowed_roots = [(model_root / "sliced").resolve()]
-        if train_root is not None:
-            allowed_roots.append((train_root / "dataset" / "sliced").resolve())
+        allowed_roots.extend(path.resolve() for path in self._training_sliced_directories(train_root))
         if not source_path.exists() or not source_path.is_file():
             print(
                 "[role-emotion] 切分音频不存在: "
@@ -765,9 +776,25 @@ class RoleService:
                 f"path={source_path} allowed_roots={[str(root) for root in allowed_roots]}",
                 flush=True,
             )
-            raise ValueError("选择的切分音频不在当前角色的模型 sliced 目录或训练 dataset/sliced 目录中")
+            raise ValueError("选择的切分音频不在当前角色和版本的模型切分目录或训练记录中")
 
         return source_path
+
+    @staticmethod
+    def _training_sliced_directories(train_root: Path | None) -> list[Path]:
+        if train_root is None:
+            return []
+        # Workbench runs keep their own audio; an empty/new run must not hide
+        # usable clips from an earlier run of the same role and version.
+        runs = sorted(
+            (path for path in (train_root / "runs").glob("*") if path.is_dir()),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        workspaces = [*runs, train_root]
+        sliced = [path / relative for path in workspaces for relative in ("dataset/sliced", "source/sliced")]
+        # Runs reusing cached features may only have prepared 32 kHz audio.
+        return [*sliced, *(path / "dataset/5-wav32k" for path in workspaces)]
 
     @staticmethod
     def _list_files(directory: Path | None, allowed_suffixes: set[str] | None = None) -> list[str]:

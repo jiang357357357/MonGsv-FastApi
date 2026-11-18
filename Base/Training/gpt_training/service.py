@@ -20,16 +20,17 @@ from subprocess import Popen, PIPE, STDOUT
 import traceback
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from Code.FastApi.Base.Training.defaults import training_defaults
 
 
 class GPTTrainingConfig(BaseModel):
     """GPT训练配置参数"""
     version: str = Field(default="v2Pro", description="训练模型版本: v1, v2, v3, v4, v2Pro, v2ProPlus, v5dev, v5turbo")
     # 基础训练参数
-    batch_size: int = Field(default=8, description="每张显卡的batch_size")
-    total_epoch: int = Field(default=15, description="总训练轮数")
-    save_every_epoch: int = Field(default=20, description="保存频率")
+    batch_size: Optional[int] = Field(default=None, description="每张显卡的batch_size；默认按显存计算")
+    total_epoch: int = Field(default=15, ge=1, description="总训练轮数")
+    save_every_epoch: Optional[int] = Field(default=None, description="兼容旧请求；固定在最后一轮保存")
     
     # 学习率相关
     learning_rate: float = Field(default=0.01, description="初始学习率")
@@ -48,7 +49,7 @@ class GPTTrainingConfig(BaseModel):
     
     # 高级选项
     if_dpo: bool = Field(default=False, description="是否开启DPO训练选项(实验性)")
-    precision: str = Field(default="16-mixed", description="训练精度: 16-mixed, 32")
+    precision: Optional[str] = Field(default=None, description="训练精度: 16-mixed, 32；默认按设备选择")
     
     # 数据相关
     max_sec: int = Field(default=54, description="最大音频长度(秒)")
@@ -64,6 +65,16 @@ class GPTTrainingConfig(BaseModel):
     hidden_dim: int = Field(default=512, description="隐藏维度")
     n_layer: int = Field(default=24, description="Transformer层数")
     n_head: int = Field(default=16, description="注意力头数")
+
+    @model_validator(mode="after")
+    def official_defaults(self):
+        defaults = training_defaults(self.version)
+        object.__setattr__(self, "save_every_epoch", self.total_epoch)
+        if self.batch_size is None:
+            object.__setattr__(self, "batch_size", defaults["gpt_batch_size"])
+        if self.precision is None:
+            object.__setattr__(self, "precision", "16-mixed" if defaults["fp16"] else "32")
+        return self
 
 
 class GPTTrainingRequest(BaseModel):
@@ -159,11 +170,11 @@ class GPTTrainingService:
         if pretrained_s1 and pretrained_s1.strip():
             return pretrained_s1.strip()
 
-        relative_path = (
-            os.path.join("GPT_SoVITS", "pretrained_models", "s1bert25hz-2kh-longer-epoch=68e-step=50232.ckpt")
-            if version == "v1"
-            else os.path.join("GPT_SoVITS", "pretrained_models", "s1v3.ckpt")
-        )
+        names = {
+            "v1": "s1bert25hz-2kh-longer-epoch=68e-step=50232.ckpt",
+            "v2": "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt",
+        }
+        relative_path = os.path.join("GPT_SoVITS", "pretrained_models", names.get(version, "s1v3.ckpt"))
         return os.path.join(self.gpt_sovits_root, relative_path)
     
     def _create_config_file(self, request: GPTTrainingRequest, s1_dir: str) -> str:
@@ -171,7 +182,7 @@ class GPTTrainingService:
         config = request.config
         dataset_dir = os.path.join(s1_dir, "dataset")
         checkpoint_dir = os.path.join(s1_dir, "train", "gpt")
-        save_every_epoch = max(1, min(config.save_every_epoch, config.total_epoch))
+        save_every_epoch = config.total_epoch
         
         # 选择配置模板
         config_template = (

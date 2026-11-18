@@ -20,17 +20,18 @@ from subprocess import Popen, PIPE, STDOUT
 import traceback
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from Code.FastApi.Base.Training.defaults import training_defaults
 
 
 class SoVITSTrainingConfig(BaseModel):
     """SoVITS训练配置参数"""
     # 基础训练参数
     version: str = Field(default="v2Pro", description="模型版本: v1, v2, v3, v4, v2Pro, v2ProPlus, v5dev, v5turbo")
-    batch_size: int = Field(default=32, description="每张显卡的batch_size")
-    total_epoch: int = Field(default=8, description="总训练轮数")
+    batch_size: Optional[int] = Field(default=None, description="每张显卡的batch_size；默认按显存计算")
+    total_epoch: Optional[int] = Field(default=None, ge=1, description="总训练轮数；默认按模型版本选择")
     log_interval: int = Field(default=100, ge=1, description="每隔几步记录训练 Loss")
-    save_every_epoch: int = Field(default=8, description="保存频率")
+    save_every_epoch: Optional[int] = Field(default=None, description="兼容旧请求；固定在最后一轮保存")
     
     # 学习率相关
     text_low_lr_rate: float = Field(default=0.4, description="文本模块学习率权重")
@@ -51,7 +52,7 @@ class SoVITSTrainingConfig(BaseModel):
     # 高级选项
     if_grad_ckpt: bool = Field(default=False, description="是否开启梯度检查点节省显存")
     lora_rank: int = Field(default=32, description="LoRA秩(仅v3/v4/v5dev/v5turbo)")
-    fp16_run: bool = Field(default=True, description="是否使用半精度训练")
+    fp16_run: Optional[bool] = Field(default=None, description="是否使用半精度训练；默认按设备选择")
     
     # 损失权重
     c_mel: float = Field(default=45.0, description="Mel损失权重")
@@ -60,6 +61,15 @@ class SoVITSTrainingConfig(BaseModel):
     # 数据相关
     segment_size: int = Field(default=20480, description="音频片段大小")
     sampling_rate: int = Field(default=32000, description="采样率")
+
+    @model_validator(mode="after")
+    def official_defaults(self):
+        defaults = training_defaults(self.version)
+        for field, key in (("batch_size", "sovits_batch_size"), ("total_epoch", "sovits_total_epoch"), ("fp16_run", "fp16")):
+            if getattr(self, field) is None:
+                object.__setattr__(self, field, defaults[key])
+        object.__setattr__(self, "save_every_epoch", self.total_epoch)
+        return self
 
 
 class SoVITSTrainingRequest(BaseModel):
@@ -192,7 +202,7 @@ class SoVITSTrainingService:
         version = config.version
         dataset_dir = os.path.join(s2_dir, "dataset")
         checkpoint_dir = os.path.join(s2_dir, "train", "sovits")
-        save_every_epoch = max(1, min(config.save_every_epoch, config.total_epoch))
+        save_every_epoch = config.total_epoch
         pretrained_s2g_path, pretrained_s2d_path = self._resolve_pretrained_s2_paths(
             version,
             config.pretrained_s2G,

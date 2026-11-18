@@ -1,6 +1,8 @@
 import ast
 import importlib
 import io
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,6 +94,76 @@ class TranscribeRouteBehaviorTests(unittest.IsolatedAsyncioTestCase):
             processing_time=0.1,
         )
         return SimpleNamespace(process=AsyncMock(return_value=result))
+
+    async def test_reference_playback_and_transcription_accept_the_same_resource_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            resources = workspace / "Resources"
+            for relative in (
+                "Resources/Model/world/role/v5turbo/emotion/开心.wav",
+                "Resources/Train/Projects/world/role/v5turbo/runs/one/dataset/sliced/语音.wav",
+                "Resources/Train/Projects/world/role/v5turbo/runs/two/source/sliced/语音.wav",
+                "music/legacy.wav",
+            ):
+                audio = workspace / relative
+                audio.parent.mkdir(parents=True, exist_ok=True)
+                audio.write_bytes(b"test-audio")
+                for gated in (False, True):
+                    with self.subTest(relative=relative, gated=gated):
+                        service = self._service()
+                        with (
+                            patch.object(self.gateway, "_resources_root", return_value=resources),
+                            patch.object(self.gateway, "MonConfig") as config,
+                            patch.object(self.gateway, "_ensure_service", return_value=service),
+                            patch.object(self.gateway, "_authorize_transcription_speaker", return_value={}) as authorize,
+                        ):
+                            config.return_value.workspace_root.return_value = workspace
+                            preview = await self.gateway.get_reference_audio(str(audio), user=None)
+                            result = await self.gateway._inference_transcribe(
+                                None, str(audio), "zh", "funasr", "large", "float32", gated
+                            )
+                        self.assertEqual(Path(preview.path), audio)
+                        self.assertEqual(service.process.await_args.args[0].input_path, str(audio))
+                        self.assertEqual(result["text"], "角色台词")
+                        self.assertEqual(authorize.call_count, int(gated))
+
+    async def test_invalid_reference_paths_are_rejected_before_asr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            resources = workspace / "Resources"
+            sliced = resources / "Train/Projects/world/role/v5turbo/runs/one/dataset/sliced"
+            sliced.mkdir(parents=True)
+            outside = workspace / "outside.wav"
+            outside.write_bytes(b"test-audio")
+            unsupported = sliced / "annotation.txt"
+            unsupported.write_text("not audio")
+            linked = sliced / "linked.wav"
+            linked.symlink_to(outside)
+            sibling = resources / "Train/Projects-other/clip.wav"
+            sibling.parent.mkdir(parents=True)
+            sibling.write_bytes(b"test-audio")
+            for audio, status in (
+                (outside, 400), (linked, 400), (sibling, 400),
+                (sliced / os.path.relpath(outside, sliced), 400),
+                (unsupported, 400), (sliced / "missing.wav", 404), (sliced, 404),
+            ):
+                with self.subTest(audio=audio):
+                    service = self._service()
+                    with (
+                        patch.object(self.gateway, "_resources_root", return_value=resources),
+                        patch.object(self.gateway, "MonConfig") as config,
+                        patch.object(self.gateway, "_ensure_service", return_value=service),
+                    ):
+                        config.return_value.workspace_root.return_value = workspace
+                        with self.assertRaises(self.gateway.HTTPException) as preview_error:
+                            await self.gateway.get_reference_audio(str(audio), user=None)
+                        self.assertEqual(preview_error.exception.status_code, status)
+                        with self.assertRaises(self.gateway.HTTPException) as transcribe_error:
+                            await self.gateway._inference_transcribe(
+                                None, str(audio), "zh", "funasr", "large", "float32", False
+                            )
+                        self.assertEqual(transcribe_error.exception.status_code, status)
+                    service.process.assert_not_awaited()
 
     async def test_plain_route_never_calls_voiceprint_authorization(self):
         with (

@@ -53,6 +53,7 @@ class RoleWorkspaceInitializeResponse(BaseModel):
 
 
 class RoleWorkspaceSummary(BaseModel):
+    role_id: int
     role_name: str
     world_name: str | None = None
     base_version: str | None = None

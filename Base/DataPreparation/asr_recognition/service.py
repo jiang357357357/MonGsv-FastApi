@@ -71,6 +71,9 @@ class ASRRecognitionService:
 
         self.asr_models = {
             "funasr": {
+                "name": "Fun-ASR-Nano-2512",
+                "model_id": "FunAudioLLM/Fun-ASR-Nano-2512",
+                "cantonese_backend": "UniASR",
                 "languages": ["zh", "yue"],
                 "sizes": ["large"],
                 "precisions": ["float32"],
@@ -139,7 +142,7 @@ class ASRRecognitionService:
 
     def _build_model_descriptor(self, config: ASRConfig) -> str:
         if config.model_type == "funasr":
-            return f"funasr-large/{config.language}"
+            return "funasr-classic/yue" if config.language == "yue" else f"fun-asr-nano/{config.language}"
         return f"whisper/{config.model_size}/{config.precision}"
 
     def _build_model_key(self, descriptor: str) -> str:
